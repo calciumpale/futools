@@ -3,26 +3,36 @@ import SwiftUI
 
 @MainActor
 struct VoicePressButton: View {
+    enum Style { case standard, compact }
+
     let phase: VoiceInputController.Phase
     let isEnabled: Bool
     let canPressAnywhere: Bool
     let onBegin: () -> Void
     let onEnd: () -> Void
     let onCancel: () -> Void
+    var style: Style = .standard
 
     @Environment(\.colorScheme) private var scheme
 
     private var colors: LibraryColors { LibraryColors(dark: scheme == .dark) }
     private var isRecording: Bool { phase == .recording }
-    private var recordingColor: Color { scheme == .dark ? Color(red: 1, green: 0.6, blue: 0.57) : Color(red: 0.67, green: 0.21, blue: 0.18) }
+    private var recordingColor: Color {
+        if style == .compact { return Color(nsColor: .systemRed) }
+        return scheme == .dark ? Color(red: 1, green: 0.6, blue: 0.57) : Color(red: 0.67, green: 0.21, blue: 0.18)
+    }
+    private var idleColor: Color { style == .compact ? .secondary : colors.accent }
+    private var buttonWidth: CGFloat { style == .compact ? 28 : 32 }
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 7)
-                .fill(isRecording ? recordingColor.opacity(0.13) : colors.control)
-                .frame(width: 32, height: 29)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+            if style == .standard || isRecording {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(isRecording ? recordingColor.opacity(0.13) : colors.control)
+                    .frame(width: buttonWidth, height: 29)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
 
             if phase == .requestingPermission || phase == .finishing {
                 ProgressView()
@@ -32,7 +42,7 @@ struct VoicePressButton: View {
             } else {
                 Image(systemName: isRecording ? "mic.fill" : "mic")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isRecording ? recordingColor : colors.accent)
+                    .foregroundStyle(isRecording ? recordingColor : idleColor)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -42,7 +52,7 @@ struct VoicePressButton: View {
                 onBegin: onBegin, onEnd: onEnd, onCancel: onCancel
             )
         }
-        .frame(width: 32, height: PaletteTextEditor.searchMinimumHeight)
+        .frame(width: buttonWidth, height: PaletteTextEditor.searchMinimumHeight)
         .opacity(isEnabled ? 1 : 0.45)
     }
 }

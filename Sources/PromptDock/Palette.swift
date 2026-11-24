@@ -12,8 +12,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
     var onNavigate: ((LibraryDestination) -> Void)?
     var isVisible: Bool { window?.isVisible == true }
 
-    init(store: PromptStore, optimizer: PromptOptimizer) {
-        model = PaletteModel(store: store, optimizer: optimizer)
+    init(store: PromptStore, optimizer: PromptOptimizer,
+         recognizeScreenshot: @escaping @Sendable (OCRImage) async throws -> String = { try await ScreenshotOCR.recognize($0) }) {
+        model = PaletteModel(store: store, optimizer: optimizer, recognizeScreenshot: recognizeScreenshot)
         super.init()
         model.performInsert = { [weak self] text in self?.insert(text) }
         model.navigate = { [weak self] destination in self?.onNavigate?(destination) }
@@ -23,10 +24,11 @@ final class PaletteController: NSObject, NSWindowDelegate {
             self?.handleSearchCommand(command) ?? false
         }
         model.beginVoiceInput = { [weak self] in self?.beginVoiceInput() }
+        model.acceptRecognizedText = { [weak self] text in self?.insertIntoDraft(text) }
         voicePress.canBegin = { [weak self] in
             guard let self else { return false }
             return self.isVisible && self.window?.isKeyWindow == true &&
-                self.model.voice.phase == .idle && !self.model.optimizer.isOptimizing
+                self.model.canStartVoice
         }
         voicePress.onBegin = { [weak self] in self?.beginVoiceInput() }
         voicePress.onEnd = { [weak self] in self?.model.voice.finish() }
@@ -36,10 +38,11 @@ final class PaletteController: NSObject, NSWindowDelegate {
         }
     }
 
-    func show(target: NSRunningApplication?) {
+    func show(target: NSRunningApplication?, initialText: String? = nil) {
         guard let screen = screenUnderCursor() else { return }
         self.target = target
         model.prepare(for: target)
+        if let initialText { model.setDraft(initialText) }
         let window = self.window ?? makeWindow()
         self.window = window
 
@@ -56,6 +59,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
     func dismiss(keepVoiceAuthorization: Bool = false) {
         voicePress.stop()
         window?.pendingEnter = nil
+        model.removeScreenshot()
         if !keepVoiceAuthorization || model.voice.phase != .requestingPermission {
             model.voice.cancel()
         }
@@ -73,12 +77,12 @@ final class PaletteController: NSObject, NSWindowDelegate {
     }
 
     private func beginVoiceInput() {
-        guard isVisible, !model.optimizer.isOptimizing else { return }
+        guard isVisible, model.canStartVoice else { return }
         window?.pendingEnter = nil
-        model.voice.begin { [weak self] text in self?.acceptTranscript(text) }
+        model.voice.begin { [weak self] text in self?.insertIntoDraft(text) }
     }
 
-    private func acceptTranscript(_ text: String) {
+    func insertIntoDraft(_ text: String) {
         guard isVisible, let window else { return }
         window.focusSearch()
         guard let editor = window.searchField else {
@@ -193,6 +197,12 @@ private final class PaletteModel: ObservableObject {
     let store: PromptStore
     let optimizer: PromptOptimizer
     let voice = VoiceInputController()
+    private let recognizeScreenshot: @Sendable (OCRImage) async throws -> String
+    private var recognitionTask: Task<Void, Never>?
+    @Published private(set) var screenshot: OCRImage?
+    @Published private(set) var isRecognizing = false
+    @Published private(set) var screenshotError: String?
+    private(set) var screenshotPreview: NSImage?
     @Published private(set) var selectedID: UUID?
     @Published private(set) var targetName: String?
     @Published private(set) var targetIcon: NSImage?
@@ -205,10 +215,13 @@ private final class PaletteModel: ObservableObject {
     var focusSearch: (() -> Void)?
     var handleSearchCommand: ((Selector) -> Bool)?
     var beginVoiceInput: (() -> Void)?
+    var acceptRecognizedText: ((String) -> Void)?
 
-    init(store: PromptStore, optimizer: PromptOptimizer) {
+    init(store: PromptStore, optimizer: PromptOptimizer,
+         recognizeScreenshot: @escaping @Sendable (OCRImage) async throws -> String) {
         self.store = store
         self.optimizer = optimizer
+        self.recognizeScreenshot = recognizeScreenshot
     }
 
     var matches: [Prompt] { store.matching(optimizer.draft) }
@@ -217,10 +230,12 @@ private final class PaletteModel: ObservableObject {
         !optimizer.draft.contains(where: \.isNewline) && !matches.isEmpty
     }
     var canOptimize: Bool {
-        voice.phase == .idle && !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        voice.phase == .idle && !isRecognizing && !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+    var canStartVoice: Bool { voice.phase == .idle && !optimizer.isOptimizing && !isRecognizing }
+    var canRecognize: Bool { screenshot != nil && canStartVoice }
     var insertionText: String? {
-        guard !optimizer.isOptimizing, voice.phase == .idle else { return nil }
+        guard !optimizer.isOptimizing, !isRecognizing, voice.phase == .idle else { return nil }
         if let selectedPrompt { return selectedPrompt.body }
         let text = optimizer.hasResult ? optimizer.result : optimizer.draft
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
@@ -231,6 +246,7 @@ private final class PaletteModel: ObservableObject {
         targetIcon = target?.icon
         hasPermission = PasteService.hasPermission
         optimizer.reset()
+        removeScreenshot()
         if voice.phase != .requestingPermission { voice.cancel() }
         selectedID = matches.first?.id
     }
@@ -240,6 +256,48 @@ private final class PaletteModel: ObservableObject {
         optimizer.draft = value
         optimizer.clearResult()
         selectedID = matches.first?.id
+    }
+
+    func pasteScreenshot(_ board: NSPasteboard) -> Bool {
+        guard OCRImage.canRead(from: board) else { return false }
+        do {
+            let image = try OCRImage.read(from: board)
+            removeScreenshot()
+            screenshotPreview = image.preview
+            screenshot = image
+        } catch {
+            screenshotError = error.localizedDescription
+        }
+        return true
+    }
+
+    func removeScreenshot() {
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        screenshot = nil
+        screenshotPreview = nil
+        screenshotError = nil
+        isRecognizing = false
+    }
+
+    func runOCR() {
+        guard canRecognize, let screenshot else { return }
+        screenshotError = nil
+        isRecognizing = true
+        recognitionTask = Task { [weak self, recognizeScreenshot] in
+            do {
+                let text = try await recognizeScreenshot(screenshot)
+                guard !Task.isCancelled, let self else { return }
+                self.recognitionTask = nil
+                self.removeScreenshot()
+                self.acceptRecognizedText?(text)
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.recognitionTask = nil
+                self.isRecognizing = false
+                self.screenshotError = error.localizedDescription
+            }
+        }
     }
 
     func optimize() {
@@ -278,6 +336,7 @@ private struct PaletteView: View {
     var body: some View {
         VStack(spacing: 0) {
             searchBar
+            screenshotStatus
             voiceStatus
             separator
             HStack(spacing: 0) {
@@ -337,7 +396,7 @@ private struct PaletteView: View {
         HStack(alignment: .top, spacing: 13) {
             VoicePressButton(
                 phase: voice.phase,
-                isEnabled: !optimizer.isOptimizing,
+                isEnabled: !optimizer.isOptimizing && !model.isRecognizing,
                 canPressAnywhere: model.canPressAnywhere,
                 onBegin: { model.beginVoiceInput?() },
                 onEnd: voice.finish,
@@ -355,7 +414,8 @@ private struct PaletteView: View {
                 placeholder: "搜索或输入",
                 isSearchEditor: true,
                 onCommand: { model.handleSearchCommand?($0) ?? false },
-                onOptimize: model.optimize
+                onOptimize: model.optimize,
+                onPasteImage: model.pasteScreenshot
             )
             .frame(maxWidth: .infinity)
             if !optimizer.draft.isEmpty {
@@ -371,6 +431,7 @@ private struct PaletteView: View {
                 .frame(height: PaletteTextEditor.searchMinimumHeight)
                 .accessibilityLabel("清空输入")
             }
+            ocrButton.frame(height: PaletteTextEditor.searchMinimumHeight)
             Button { model.navigate?(.library) } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 14, weight: .medium))
@@ -386,6 +447,61 @@ private struct PaletteView: View {
         }
         .padding(.horizontal, 19)
         .padding(.vertical, 10)
+    }
+
+    private var ocrButton: some View {
+        Button(action: model.runOCR) {
+            HStack(spacing: 4) {
+                if model.isRecognizing { ProgressView().controlSize(.small) }
+                Text("OCR").font(.system(size: 12, weight: .semibold))
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 29)
+            .foregroundStyle(model.canRecognize ? colors.accent : colors.dim)
+            .background(model.canRecognize ? colors.selection : colors.control, in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.canRecognize)
+        .accessibilityLabel("OCR")
+        .help(model.screenshot == nil ? "将截图粘贴到输入框" : "发送截图到 DeepSeek 识别")
+    }
+
+    @ViewBuilder
+    private var screenshotStatus: some View {
+        if model.screenshot != nil {
+            HStack(spacing: 7) {
+                if let preview = model.screenshotPreview {
+                    Image(nsImage: preview)
+                        .resizable().scaledToFit()
+                        .frame(width: 25, height: 21)
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "photo").accessibilityHidden(true)
+                }
+                Text(model.isRecognizing ? "正在识别截图…" : "截图已粘贴")
+                    .font(.system(size: 11, weight: .medium))
+                Button(action: model.removeScreenshot) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("移除截图")
+                .help("移除截图")
+                Spacer()
+            }
+            .foregroundStyle(colors.dim)
+            .padding(.horizontal, 19)
+            .padding(.bottom, 7)
+        }
+        if let error = model.screenshotError {
+            Text(error)
+                .font(.system(size: 12))
+                .foregroundStyle(colors.warning)
+                .lineLimit(2)
+                .help(error)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 19)
+                .padding(.bottom, 7)
+        }
     }
 
     private var closeButton: some View {

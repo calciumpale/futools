@@ -8,10 +8,12 @@ enum PromptStoreChecks {
         do {
             try searchMatchesTermsAcrossFieldsInLibraryOrder()
             try editsMultilineTextAndEmptyLibraryPersistWithShortcut()
+            try storesIndependentShortcutsAndRejectsDuplicates()
+            try migratesLegacyShortcutsWithoutChangingTheCommandChord()
             try movingPromptsUpdatesStoredAndFilteredOrder()
             try failedSaveDoesNotReplaceCurrentLibrary()
             try unreadableLibraryIsPreservedWhenSaveIsAttempted()
-            print("Passed 5 prompt library checks.")
+            print("Passed 7 prompt library checks.")
         } catch {
             FileHandle.standardError.write(Data("Prompt library check failed: \(error.localizedDescription)\n".utf8))
             exit(EXIT_FAILURE)
@@ -72,6 +74,54 @@ enum PromptStoreChecks {
         try expect(!store.upsert(prompt), "Saving into an invalid destination succeeded.")
         try expect(store.prompts == original, "A failed save changed the in-memory library.")
         try expect(store.storageError != nil, "A failed save did not publish an error.")
+    }
+
+    private static func storesIndependentShortcutsAndRejectsDuplicates() throws {
+        let file = temporaryLibrary()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = PromptStore(fileURL: file)
+        try expect(store.shortcut == .defaultValue && store.compactShortcut == .compactDefaultValue,
+                   "A new store did not use independent shortcut defaults.")
+
+        let compact = HotKey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey | controlKey), keyLabel: "P")
+        let command = HotKey(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(cmdKey | optionKey), keyLabel: "F")
+        try expect(store.setCompactShortcut(compact), "Could not save compact shortcut.")
+        try expect(store.setShortcut(command), "Could not change command shortcut independently.")
+        try expect(store.upsert(Prompt(title: "新增", body: "正文")), "Could not save a prompt with both bindings.")
+        let beforeConflict = try Data(contentsOf: file)
+        try expect(!store.setCompactShortcut(command) && !store.setShortcut(compact), "Store accepted duplicate shortcuts.")
+        try expect(try Data(contentsOf: file) == beforeConflict, "Rejecting a shortcut collision modified the library.")
+
+        let reopened = PromptStore(fileURL: file)
+        try expect(reopened.shortcut == command && reopened.compactShortcut == compact,
+                   "The two persisted bindings were lost or overwritten.")
+    }
+
+    private static func migratesLegacyShortcutsWithoutChangingTheCommandChord() throws {
+        struct LegacyLibrary: Encodable {
+            let prompts: [Prompt]
+            let shortcut: HotKey
+        }
+
+        let file = temporaryLibrary()
+        let folder = file.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let prompt = Prompt(title: "旧提示词", body: "旧正文")
+        for command in [HotKey.defaultValue, .compactDefaultValue] {
+            let original = try JSONEncoder().encode(LegacyLibrary(prompts: [prompt], shortcut: command))
+            try original.write(to: file)
+            let store = PromptStore(fileURL: file)
+            try expect(store.shortcut == command && store.prompts == [prompt], "Migration changed the existing library.")
+            try expect(store.compactShortcut != command, "Migration assigned a chord already used by the command panel.")
+            if command != .compactDefaultValue {
+                try expect(store.compactShortcut == .compactDefaultValue, "Migration missed the normal compact default.")
+            }
+            try expect(try Data(contentsOf: file) == original, "Opening a legacy library rewrote its contents.")
+            try expect(store.upsert(prompt), "Could not save a migrated library.")
+            let reopened = PromptStore(fileURL: file)
+            try expect(reopened.compactShortcut == store.compactShortcut, "The migrated binding did not persist.")
+        }
     }
 
     private static func movingPromptsUpdatesStoredAndFilteredOrder() throws {

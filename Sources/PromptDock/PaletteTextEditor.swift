@@ -16,6 +16,7 @@ struct PaletteTextEditor: NSViewRepresentable {
     var onCommand: ((Selector) -> Bool)?
     var onOptimize: (() -> Void)?
     var onFocus: (() -> Void)?
+    var onPasteImage: ((NSPasteboard) -> Bool)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorScrollView()
@@ -56,6 +57,7 @@ struct PaletteTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         editor.onOptimize = onOptimize
         editor.onFocus = onFocus
+        editor.onPasteImage = onPasteImage
         let color = NSColor(textColor)
         if editor.textColor != color { editor.textColor = color }
         editor.insertionPointColor = NSColor(accentColor)
@@ -163,6 +165,7 @@ struct PaletteTextEditor: NSViewRepresentable {
         var placeholder = ""
         var onOptimize: (() -> Void)?
         var onFocus: (() -> Void)?
+        var onPasteImage: ((NSPasteboard) -> Bool)?
 
         override var needsPanelToBecomeKey: Bool { true }
 
@@ -201,6 +204,17 @@ struct PaletteTextEditor: NSViewRepresentable {
 
         override func keyDown(with event: NSEvent) {
             if !handleEditingShortcut(event) { super.keyDown(with: event) }
+        }
+
+        override func paste(_ sender: Any?) {
+            if onPasteImage?(NSPasteboard.general) == true { return }
+            super.paste(sender)
+        }
+
+        override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+            if item.action == #selector(NSText.paste(_:)), onPasteImage != nil,
+               OCRImage.canRead(from: .general) { return true }
+            return super.validateUserInterfaceItem(item)
         }
 
         private func handleEditingShortcut(_ event: NSEvent) -> Bool {

@@ -12,6 +12,18 @@ struct HotKey: Codable, Equatable {
         keyLabel: "Space"
     )
 
+    static let compactDefaultValue = HotKey(
+        keyCode: UInt32(kVK_Space),
+        modifiers: UInt32(controlKey | optionKey | shiftKey),
+        keyLabel: "Space"
+    )
+
+    static let compactLegacyFallback = HotKey(
+        keyCode: UInt32(kVK_Space),
+        modifiers: UInt32(controlKey | optionKey | cmdKey),
+        keyLabel: "Space"
+    )
+
     private static let modifierKeys: [(appKit: NSEvent.ModifierFlags, carbon: UInt32, label: String)] = [
         (.control, UInt32(controlKey), "⌃"),
         (.option, UInt32(optionKey), "⌥"),
@@ -75,12 +87,14 @@ struct HotKey: Codable, Equatable {
 @MainActor
 final class GlobalHotKey {
     private static let signature: OSType = 0x50444F43 // PDOC
+    private static let registrations = NSMapTable<NSNumber, GlobalHotKey>.strongToWeakObjects()
+    private static var eventHandler: EventHandlerRef?
+    private static var lastRegistrationID: UInt32 = 0
 
     private let onPress: () -> Void
-    private var eventHandler: EventHandlerRef?
     private var registration: EventHotKeyRef?
+    private var registrationID: UInt32?
     private var shortcut: HotKey?
-    private var registrationID: UInt32 = 0
     private var keyIsDown = false
 
     init(onPress: @escaping () -> Void) {
@@ -89,14 +103,14 @@ final class GlobalHotKey {
 
     deinit {
         if let registration { UnregisterEventHotKey(registration) }
-        if let eventHandler { RemoveEventHandler(eventHandler) }
     }
 
     func register(_ shortcut: HotKey) -> Bool {
         if self.shortcut == shortcut { return true }
-        guard installHandlerIfNeeded() else { return false }
+        guard Self.installHandlerIfNeeded() else { return false }
 
-        let nextID = registrationID &+ 1
+        Self.lastRegistrationID &+= 1
+        let nextID = Self.lastRegistrationID
         var nextRegistration: EventHotKeyRef?
         let result = RegisterEventHotKey(
             shortcut.keyCode,
@@ -112,17 +126,22 @@ final class GlobalHotKey {
         registration = nextRegistration
         registrationID = nextID
         self.shortcut = shortcut
+        Self.registrations.setObject(self, forKey: NSNumber(value: nextID))
         return true
     }
 
     func unregister() {
+        if let registrationID {
+            Self.registrations.removeObject(forKey: NSNumber(value: registrationID))
+        }
         if let registration { UnregisterEventHotKey(registration) }
         registration = nil
+        registrationID = nil
         shortcut = nil
         keyIsDown = false
     }
 
-    private func installHandlerIfNeeded() -> Bool {
+    private static func installHandlerIfNeeded() -> Bool {
         if eventHandler != nil { return true }
 
         let eventTypes = [kEventHotKeyPressed, kEventHotKeyReleased].map {
@@ -130,21 +149,20 @@ final class GlobalHotKey {
         }
         let result = InstallEventHandler(
             GetApplicationEventTarget(),
-            { _, event, context in
-                guard let event, let context, Thread.isMainThread else { return OSStatus(eventNotHandledErr) }
-                let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(context).takeUnretainedValue()
-                // The handler is installed on AppKit's main-thread application event target.
-                return MainActor.assumeIsolated { hotKey.handle(event) }
+            { _, event, _ in
+                guard let event, Thread.isMainThread else { return OSStatus(eventNotHandledErr) }
+                // The one shared handler runs on AppKit's main-thread application event target.
+                return MainActor.assumeIsolated { GlobalHotKey.route(event) }
             },
             eventTypes.count,
             eventTypes,
-            Unmanaged.passUnretained(self).toOpaque(),
+            nil,
             &eventHandler
         )
         return result == noErr
     }
 
-    private func handle(_ event: EventRef) -> OSStatus {
+    private static func route(_ event: EventRef) -> OSStatus {
         var incoming = EventHotKeyID()
         let result = GetEventParameter(
             event,
@@ -155,14 +173,23 @@ final class GlobalHotKey {
             nil,
             &incoming
         )
-        guard result == noErr, registration != nil, incoming.signature == Self.signature,
-              incoming.id == registrationID else { return OSStatus(eventNotHandledErr) }
+        guard result == noErr, incoming.signature == signature,
+              let hotKey = registrations.object(forKey: NSNumber(value: incoming.id)) else {
+            return OSStatus(eventNotHandledErr)
+        }
+        return hotKey.handle(kind: GetEventKind(event))
+    }
 
-        if GetEventKind(event) == UInt32(kEventHotKeyReleased) {
+    private func handle(kind: UInt32) -> OSStatus {
+        if kind == UInt32(kEventHotKeyReleased) {
             keyIsDown = false
-        } else if !keyIsDown {
-            keyIsDown = true
-            onPress()
+        } else if kind == UInt32(kEventHotKeyPressed) {
+            if !keyIsDown {
+                keyIsDown = true
+                onPress()
+            }
+        } else {
+            return OSStatus(eventNotHandledErr)
         }
         return noErr
     }

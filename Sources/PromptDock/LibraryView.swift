@@ -20,6 +20,7 @@ struct LibraryView: View {
     @ObservedObject private var store: PromptStore
     private let shortcutRecorder: ShortcutRecorder
     private let onSaveShortcut: (HotKey) -> String?
+    private let onSaveCompactShortcut: (HotKey) -> String?
 
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var titleFocused: Bool
@@ -35,11 +36,13 @@ struct LibraryView: View {
         newBody: String = "",
         showSettings: Bool = false,
         shortcutRecorder: ShortcutRecorder,
-        onSaveShortcut: @escaping (HotKey) -> String?
+        onSaveShortcut: @escaping (HotKey) -> String?,
+        onSaveCompactShortcut: @escaping (HotKey) -> String?
     ) {
         self.store = store
         self.shortcutRecorder = shortcutRecorder
         self.onSaveShortcut = onSaveShortcut
+        self.onSaveCompactShortcut = onSaveCompactShortcut
         _showingSettings = State(initialValue: showSettings)
         let selected = store.prompts.first { $0.id == selectedID } ?? store.prompts.first
         _draft = State(initialValue: startNew ? Draft.new(body: newBody) : selected.map(Draft.saved))
@@ -66,7 +69,7 @@ struct LibraryView: View {
             }
             if showingSettings {
                 LibrarySettings(store: store, colors: colors, shortcutRecorder: shortcutRecorder,
-                                onSaveShortcut: onSaveShortcut)
+                                onSaveShortcut: onSaveShortcut, onSaveCompactShortcut: onSaveCompactShortcut)
             } else {
                 HStack(spacing: 0) {
                     sidebar
@@ -374,15 +377,25 @@ struct LibraryView: View {
 
 @MainActor
 private struct LibrarySettings: View {
+    private enum ShortcutRow: Hashable {
+        case command, compact
+
+        var title: String { self == .command ? "命令面板" : "精简模式" }
+        var defaultShortcut: HotKey { self == .command ? .defaultValue : .compactDefaultValue }
+    }
+
     @ObservedObject var store: PromptStore
     let colors: LibraryColors
     @ObservedObject var shortcutRecorder: ShortcutRecorder
     let onSaveShortcut: (HotKey) -> String?
+    let onSaveCompactShortcut: (HotKey) -> String?
 
-    @ViewState private var shortcutError: String?
+    @ViewState private var recordingRow: ShortcutRow?
+    @ViewState private var shortcutErrors: [ShortcutRow: String] = [:]
     @ViewState private var hasPermission = PasteService.hasPermission
+    @AppStorage(AppAppearance.preferenceKey) private var appearance: AppAppearance = .system
 
-    private var recording: Bool { shortcutRecorder.isRecording }
+    private var activeRow: ShortcutRow? { shortcutRecorder.isRecording ? recordingRow : nil }
 
     var body: some View {
         ScrollView {
@@ -393,29 +406,20 @@ private struct LibrarySettings: View {
                     .padding(.bottom, 2)
 
                 section("全局快捷键", icon: "command") {
-                    Text("在任意应用中呼出提示词面板。再次按下可收起。")
+                    Text("在任意应用中呼出对应面板。再次按下同一快捷键可收起。")
                         .foregroundStyle(colors.secondary)
-                    HStack(spacing: 9) {
-                        Text(recording ? "等待按键…" : store.shortcut.display)
-                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(colors.accent)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 7)
-                            .background(colors.soft, in: RoundedRectangle(cornerRadius: 7))
-                            .accessibilityLabel(recording ? "等待输入快捷键" : "当前快捷键 \(store.shortcut.display)")
-                        Spacer()
-                        Button("恢复默认") { applyShortcut(.defaultValue) }
-                            .disabled(recording || store.shortcut == .defaultValue)
-                        Button(recording ? "取消录制" : "录制快捷键") { toggleRecording() }
-                            .buttonStyle(.borderedProminent)
+                    shortcutControls(.command)
+                    Divider()
+                    shortcutControls(.compact)
+                }
+
+                section("外观", icon: "circle.lefthalf.filled") {
+                    Picker("外观模式", selection: $appearance) {
+                        ForEach(AppAppearance.allCases, id: \.rawValue) { mode in
+                            Text(mode.title).tag(mode)
+                        }
                     }
-                    if let shortcutError {
-                        Label(shortcutError, systemImage: "exclamationmark.circle")
-                            .foregroundStyle(colors.warning)
-                    } else if recording {
-                        Text("按下组合键，例如 ⌃⌥P。按 Esc 取消。")
-                            .foregroundStyle(colors.secondary)
-                    }
+                    .pickerStyle(.segmented)
                 }
 
                 section("辅助功能权限", icon: "accessibility") {
@@ -442,6 +446,7 @@ private struct LibrarySettings: View {
         }
         .frame(maxHeight: .infinity)
         .onAppear { hasPermission = PasteService.hasPermission }
+        .onChange(of: appearance) { $0.apply() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             hasPermission = PasteService.hasPermission
         }
@@ -466,32 +471,76 @@ private struct LibrarySettings: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(colors.line).allowsHitTesting(false))
     }
 
-    private func toggleRecording() {
-        shortcutError = nil
-        if recording {
-            shortcutRecorder.stop()
+    private func shortcutControls(_ row: ShortcutRow) -> some View {
+        let shortcut = currentShortcut(for: row)
+        let recording = activeRow == row
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 9) {
+                Text(row.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 64, alignment: .leading)
+                Text(recording ? "等待按键…" : shortcut.display)
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(colors.accent)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 7)
+                    .background(colors.soft, in: RoundedRectangle(cornerRadius: 7))
+                    .accessibilityLabel(recording ? "等待录制\(row.title)快捷键" : "\(row.title)快捷键 \(shortcut.display)")
+                Spacer()
+                Button("恢复默认") { applyShortcut(row.defaultShortcut, for: row) }
+                    .disabled(activeRow != nil || shortcut == row.defaultShortcut)
+                    .accessibilityLabel("恢复\(row.title)默认快捷键")
+                Button(recording ? "取消录制" : "录制快捷键") { toggleRecording(for: row) }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("\(recording ? "取消录制" : "录制")\(row.title)快捷键")
+            }
+            if let error = shortcutErrors[row] {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .foregroundStyle(colors.warning)
+            } else if recording {
+                Text("按下组合键，例如 ⌃⌥P。按 Esc 取消。")
+                    .foregroundStyle(colors.secondary)
+            }
+        }
+    }
+
+    private func currentShortcut(for row: ShortcutRow) -> HotKey {
+        row == .command ? store.shortcut : store.compactShortcut
+    }
+
+    private func toggleRecording(for row: ShortcutRow) {
+        shortcutErrors[row] = nil
+        if activeRow == row {
+            stopRecording()
         } else {
+            recordingRow = row
             shortcutRecorder.start(
-                onKeyDown: capture,
-                onCurrentShortcut: { applyShortcut(store.shortcut) }
+                onKeyDown: { capture($0, for: row) },
+                onCurrentShortcut: { applyShortcut($0, for: row) }
             )
         }
     }
 
-    private func capture(_ event: NSEvent) {
+    private func stopRecording() {
+        shortcutRecorder.stop()
+        recordingRow = nil
+    }
+
+    private func capture(_ event: NSEvent, for row: ShortcutRow) {
         if event.keyCode == kVK_Escape {
-            shortcutRecorder.stop()
-            shortcutError = nil
+            stopRecording()
+            shortcutErrors[row] = nil
         } else if let shortcut = HotKey.capture(event) {
-            applyShortcut(shortcut)
+            applyShortcut(shortcut, for: row)
         } else {
-            shortcutError = "请试试 ⌃⌥P 或 ⌘⇧P。复制、粘贴等常用快捷键已保留。"
+            shortcutErrors[row] = "请试试 ⌃⌥P 或 ⌘⇧P。复制、粘贴等常用快捷键已保留。"
         }
     }
 
-    private func applyShortcut(_ shortcut: HotKey) {
-        shortcutError = onSaveShortcut(shortcut)
-        if shortcutError == nil { shortcutRecorder.stop() }
+    private func applyShortcut(_ shortcut: HotKey, for row: ShortcutRow) {
+        let save = row == .command ? onSaveShortcut : onSaveCompactShortcut
+        shortcutErrors[row] = save(shortcut)
+        if shortcutErrors[row] == nil { stopRecording() }
     }
 }
 
@@ -539,15 +588,16 @@ final class ShortcutRecorder: ObservableObject {
     @Published private(set) var isRecording = false
     private weak var window: NSWindow?
     private var keyMonitor: Any?
-    private var onCurrentShortcut: (() -> Void)?
+    private var onCurrentShortcut: ((HotKey) -> Void)?
 
     func attach(to window: NSWindow) {
         stop()
         self.window = window
     }
 
-    func start(onKeyDown: @escaping (NSEvent) -> Void, onCurrentShortcut: @escaping () -> Void) {
+    func start(onKeyDown: @escaping (NSEvent) -> Void, onCurrentShortcut: @escaping (HotKey) -> Void) {
         guard let window else { return }
+        stop()
         if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
         self.onCurrentShortcut = onCurrentShortcut
         // Capture before the responder chain and menu key equivalents handle the chord.
@@ -560,9 +610,10 @@ final class ShortcutRecorder: ObservableObject {
         isRecording = true
     }
 
-    func useCurrentShortcut() -> Bool {
-        guard isRecording, let window, NSApp.keyWindow === window, NSApp.isActive else { return false }
-        onCurrentShortcut?()
+    func useCurrentShortcut(_ shortcut: HotKey) -> Bool {
+        guard isRecording, let window, NSApp.keyWindow === window, NSApp.isActive,
+              let onCurrentShortcut else { return false }
+        onCurrentShortcut(shortcut)
         return true
     }
 

@@ -126,7 +126,7 @@ struct DeepSeekSettingsContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("仅在你运行优化时，当前草稿才会发送给 DeepSeek。密钥保存在 macOS 钥匙串。")
+            Text("运行优化时会将草稿发送给 DeepSeek，运行 OCR 时会发送截图。两项功能共用保存在 macOS 钥匙串的密钥。")
                 .foregroundStyle(colors.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {

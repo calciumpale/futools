@@ -8,6 +8,7 @@ enum PasteOutcome: Equatable {
     case copiedNoTarget
     case copiedTargetChanged
     case copiedTerminal
+    case targetLostFocus
     case failed
 }
 
@@ -33,15 +34,18 @@ final class PasteService {
         NSWorkspace.shared.open(url)
     }
 
-    func paste(_ text: String, into app: NSRunningApplication?) async -> PasteOutcome {
+    func paste(_ text: String, into app: NSRunningApplication?,
+               targetIsFocused: (@MainActor () -> Bool)? = nil) async -> PasteOutcome {
         guard !text.isEmpty, !isPasting else { return .failed }
         isPasting = true
         defer { isPasting = false }
 
         let board = NSPasteboard.general
         guard let app, !app.isTerminated, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            if targetIsFocused != nil { return .targetLostFocus }
             return copy(text, to: board, otherwise: .copiedNoTarget)
         }
+        guard targetIsFocused?() != false else { return .targetLostFocus }
         if let bundleIdentifier = app.bundleIdentifier,
            Self.terminalBundleIdentifiers.contains(bundleIdentifier),
            text.rangeOfCharacter(from: .newlines) != nil {
@@ -57,8 +61,10 @@ final class PasteService {
 
         let pid = app.processIdentifier
         guard isFrontmost(pid) else {
+            if targetIsFocused != nil { return .targetLostFocus }
             return copy(text, to: board, otherwise: .copiedTargetChanged)
         }
+        guard targetIsFocused?() != false else { return .targetLostFocus }
         let keyCode = pasteKeyCode()
         guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
@@ -68,8 +74,19 @@ final class PasteService {
         let previousChange = board.changeCount
         let previousItems = snapshot(board)
         let canRestore = board.changeCount == previousChange
+        guard targetIsFocused?() != false else { return .targetLostFocus }
         guard let pasteChange = write(text, to: board) else { return .failed }
-        guard isFrontmost(pid) else { return .copiedTargetChanged }
+        if targetIsFocused?() == false {
+            if canRestore, let previousItems { restore(previousItems, on: board, ifUnchangedSince: pasteChange) }
+            return .targetLostFocus
+        }
+        guard isFrontmost(pid) else {
+            if targetIsFocused != nil {
+                if canRestore, let previousItems { restore(previousItems, on: board, ifUnchangedSince: pasteChange) }
+                return .targetLostFocus
+            }
+            return .copiedTargetChanged
+        }
         guard Self.hasPermission else { return .copiedNoPermission }
         guard board.changeCount == pasteChange else { return .failed }
 
@@ -81,10 +98,7 @@ final class PasteService {
         if canRestore, let previousItems {
             // The target handles Cmd+V asynchronously. Restore only while our temporary item is current.
             try? await Task.sleep(for: .milliseconds(650))
-            if board.changeCount == pasteChange {
-                board.clearContents()
-                if !previousItems.isEmpty { board.writeObjects(previousItems) }
-            }
+            restore(previousItems, on: board, ifUnchangedSince: pasteChange)
         }
         return .pasted
     }
@@ -119,6 +133,12 @@ final class PasteService {
         let change = board.declareTypes([.string], owner: nil)
         guard board.setString(text, forType: .string), board.changeCount == change else { return nil }
         return change
+    }
+
+    private func restore(_ items: [NSPasteboardItem], on board: NSPasteboard, ifUnchangedSince change: Int) {
+        guard board.changeCount == change else { return }
+        board.clearContents()
+        if !items.isEmpty { board.writeObjects(items) }
     }
 
     private func snapshot(_ board: NSPasteboard) -> [NSPasteboardItem]? {

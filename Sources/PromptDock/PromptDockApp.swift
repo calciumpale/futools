@@ -19,21 +19,37 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let pasteService = PasteService()
     private let shortcutRecorder = ShortcutRecorder()
     private lazy var hotKey = GlobalHotKey { [weak self] in self?.handleHotKey() }
+    private lazy var compactHotKey = GlobalHotKey { [weak self] in self?.handleCompactHotKey() }
     private let optimizer = PromptOptimizer { try await DeepSeekPromptAPI.rewrite($0) }
     private lazy var palette = PaletteController(store: store, optimizer: optimizer)
+    private let compactPanel = CompactPromptPanel(optimizer: PromptOptimizer { try await DeepSeekPromptAPI.rewrite($0) })
     private let toast = ClipboardToast()
     private var statusItem: NSStatusItem?
+    private var menuBarOCR: MenuBarOCRDrop?
     private var openItem: NSMenuItem?
+    private var compactItem: NSMenuItem?
     private var libraryWindow: NSWindow?
     private var shortcutActive = false
+    private var compactShortcutActive = false
     private var isPasting = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppAppearance.applyStoredPreference()
         makeMainMenu()
         makeStatusMenu()
         shortcutActive = hotKey.register(store.shortcut)
+        compactShortcutActive = compactHotKey.register(store.compactShortcut)
         palette.onInsert = { [weak self] text, app in self?.insert(text, into: app) }
         palette.onNavigate = { [weak self] destination in self?.showLibrary(destination) }
+        compactPanel.onInsert = { [weak self] text, app, targetIsFocused in
+            guard let self else { return .failed }
+            return await self.performInsert(text, into: app, targetIsFocused: targetIsFocused)
+        }
+        compactPanel.onTargetLost = { [weak self] in self?.showTargetLost() }
+        compactPanel.mayPresent = { [weak self] in
+            guard let self else { return false }
+            return !self.palette.isVisible && self.menuBarOCR?.isVisible != true
+        }
 
         let didOpenKey = "didOpenLibrary"
         if !UserDefaults.standard.bool(forKey: didOpenKey) || !shortcutActive {
@@ -42,6 +58,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if !shortcutActive {
             toast.show("这个快捷键无法启用，请在设置中换一个。", symbol: "keyboard")
+        } else if !compactShortcutActive {
+            toast.show("精简模式快捷键无法启用，请在设置中换一个。", symbol: "keyboard")
         }
     }
 
@@ -52,6 +70,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     func applicationWillTerminate(_ notification: Notification) {
         palette.dismiss()
+        compactPanel.dismiss()
+        menuBarOCR?.dismiss()
     }
 
     private func makeMainMenu() {
@@ -88,12 +108,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Prompt Dock")
         image?.isTemplate = true
         item.button?.image = image
-        item.button?.toolTip = "Prompt Dock"
+        item.button?.toolTip = "Prompt Dock · 拖入截图识别"
         item.button?.setAccessibilityLabel("Prompt Dock")
 
         let menu = NSMenu()
         menu.delegate = self
         openItem = addMenuItem("打开命令面板", action: #selector(openFromMenu), to: menu)
+        compactItem = addMenuItem("精简模式", action: #selector(openCompactFromMenu), to: menu)
         addMenuItem("管理提示词…", action: #selector(openLibrary), to: menu)
         addMenuItem("新建提示词…", action: #selector(newPrompt), to: menu)
         menu.addItem(.separator())
@@ -101,6 +122,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         addMenuItem("退出 Prompt Dock", action: #selector(quit), to: menu)
         item.menu = menu
         statusItem = item
+        if let button = item.button {
+            menuBarOCR = MenuBarOCRDrop(button: button) { [weak self] text in self?.openOCRResult(text) }
+        }
     }
 
     @discardableResult
@@ -112,6 +136,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
         openItem?.title = shortcutActive ? "打开命令面板   \(store.shortcut.display)" : "打开命令面板"
+        compactItem?.title = compactShortcutActive ? "精简模式   \(store.compactShortcut.display)" : "精简模式"
     }
 
     @objc private func openFromMenu() {
@@ -120,14 +145,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         DispatchQueue.main.async { [weak self] in self?.togglePalette(target: target) }
     }
 
+    @objc private func openCompactFromMenu() {
+        let target = currentTarget()
+        DispatchQueue.main.async { [weak self] in self?.showCompact(target: target) }
+    }
+
     @objc private func openLibrary() { showLibrary(.library) }
     @objc private func newPrompt() { showLibrary(.new) }
     @objc private func openSettings() { showLibrary(.settings) }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func handleHotKey() {
-        if shortcutRecorder.useCurrentShortcut() { return }
+        if shortcutRecorder.useCurrentShortcut(store.shortcut) { return }
         togglePalette(target: currentTarget())
+    }
+
+    private func handleCompactHotKey() {
+        if shortcutRecorder.useCurrentShortcut(store.compactShortcut) { return }
+        showCompact(target: currentTarget())
     }
 
     private func currentTarget() -> NSRunningApplication? {
@@ -140,34 +175,82 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if palette.isVisible {
             palette.dismiss()
         } else if !isPasting {
+            compactPanel.suspendPresentation()
+            menuBarOCR?.dismiss()
             toast.dismiss()
             palette.show(target: target)
         }
     }
 
-    private func insert(_ text: String, into target: NSRunningApplication?) {
-        guard !isPasting else { return }
-        isPasting = true
-        Task { @MainActor in
-            let result = await pasteService.paste(text, into: target)
-            isPasting = false
-            switch result {
-            case .pasted:
-                break
-            case .copiedNoPermission:
-                toast.show("已复制 · 开启辅助功能权限后可自动填入", symbol: "doc.on.doc")
-            case .copiedNoTarget, .copiedTargetChanged:
-                toast.show("已复制 · 在目标输入框按 ⌘V 粘贴", symbol: "doc.on.doc")
-            case .copiedTerminal:
-                toast.show("已复制多行提示词 · 请在终端确认后手动粘贴", symbol: "terminal")
-            case .failed:
-                toast.show("填入失败，请重试", symbol: "exclamationmark.circle")
-            }
+    private func showCompact(target: NSRunningApplication?) {
+        if compactPanel.isEnabled {
+            compactPanel.dismiss()
+            return
         }
+        guard !isPasting else { return }
+        guard PasteService.hasPermission else {
+            toast.show("开启辅助功能权限后可使用精简模式", symbol: "accessibility")
+            return
+        }
+        palette.dismiss()
+        menuBarOCR?.dismiss()
+        toast.dismiss()
+        if let target, compactPanel.show(target: target) { return }
+        let message = target != nil && compactPanel.lacksSpaceAbove
+            ? "输入框上方空间不足，请移动目标窗口后重试"
+            : "请先在目标 App 的输入框中放置光标"
+        toast.show(message, symbol: "cursorarrow.rays")
+    }
+
+    private func openOCRResult(_ text: String) {
+        guard !isPasting else { return }
+        let target = currentTarget()
+        menuBarOCR?.dismiss()
+        compactPanel.suspendPresentation()
+        toast.dismiss()
+        if palette.isVisible {
+            palette.insertIntoDraft(text)
+        } else {
+            palette.show(target: target, initialText: text)
+        }
+    }
+
+    private func insert(_ text: String, into target: NSRunningApplication?) {
+        Task { _ = await performInsert(text, into: target) }
+    }
+
+    private func performInsert(_ text: String, into target: NSRunningApplication?,
+                               targetIsFocused: (@MainActor () -> Bool)? = nil) async -> PasteOutcome {
+        guard !isPasting else { return .failed }
+        isPasting = true
+        defer { isPasting = false }
+        let result = await pasteService.paste(text, into: target, targetIsFocused: targetIsFocused)
+        guard !Task.isCancelled else { return result }
+        switch result {
+        case .pasted:
+            break
+        case .copiedNoPermission:
+            toast.show("已复制 · 开启辅助功能权限后可自动填入", symbol: "doc.on.doc")
+        case .copiedNoTarget, .copiedTargetChanged:
+            toast.show("已复制 · 在目标输入框按 ⌘V 粘贴", symbol: "doc.on.doc")
+        case .copiedTerminal:
+            toast.show("已复制多行提示词 · 请在终端确认后手动粘贴", symbol: "terminal")
+        case .targetLostFocus:
+            showTargetLost()
+        case .failed:
+            toast.show("填入失败，请重试", symbol: "exclamationmark.circle")
+        }
+        return result
+    }
+
+    private func showTargetLost() {
+        toast.show("请将光标移回原输入框，再试一次", symbol: "cursorarrow.rays")
     }
 
     private func showLibrary(_ destination: LibraryDestination) {
         palette.dismiss()
+        compactPanel.suspendPresentation()
+        menuBarOCR?.dismiss()
         toast.dismiss()
         if let window = libraryWindow {
             activate()
@@ -203,7 +286,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         window.contentView = NSHostingView(rootView: LibraryView(
             store: store, selectedID: selectedID, startNew: startNew, newBody: newBody, showSettings: showSettings,
             shortcutRecorder: shortcutRecorder,
-            onSaveShortcut: { [weak self] shortcut in self?.saveShortcut(shortcut) }
+            onSaveShortcut: { [weak self] shortcut in self?.saveShortcut(shortcut, forCompactPanel: false) },
+            onSaveCompactShortcut: { [weak self] shortcut in self?.saveShortcut(shortcut, forCompactPanel: true) }
         ))
         window.center()
         libraryWindow = window
@@ -219,18 +303,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
-    private func saveShortcut(_ shortcut: HotKey) -> String? {
-        let previous = store.shortcut
-        let previousActive = shortcutActive
-        guard hotKey.register(shortcut) else { return "这个快捷键无法启用，可能已被其他应用占用。" }
-        shortcutActive = true
-        guard shortcut != previous else { return nil }
-        guard store.setShortcut(shortcut) else {
-            shortcutActive = false
-            if previousActive {
-                shortcutActive = hotKey.register(previous)
-            }
-            if !shortcutActive { hotKey.unregister() }
+    private func saveShortcut(_ shortcut: HotKey, forCompactPanel compact: Bool) -> String? {
+        let previous = compact ? store.compactShortcut : store.shortcut
+        let other = compact ? store.shortcut : store.compactShortcut
+        guard shortcut != other else {
+            return compact ? "这个快捷键已用于命令面板，请换一个。" : "这个快捷键已用于精简模式，请换一个。"
+        }
+        let registration = compact ? compactHotKey : hotKey
+        let previousActive = compact ? compactShortcutActive : shortcutActive
+        guard registration.register(shortcut) else { return "这个快捷键无法启用，可能已被其他应用占用。" }
+        let saved = shortcut == previous || (compact ? store.setCompactShortcut(shortcut) : store.setShortcut(shortcut))
+        let active = saved || (previousActive && registration.register(previous))
+        if compact { compactShortcutActive = active } else { shortcutActive = active }
+        if !saved {
+            if !active { registration.unregister() }
             return store.storageError ?? "无法保存快捷键。"
         }
         return nil

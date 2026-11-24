@@ -13,11 +13,19 @@ struct Prompt: Identifiable, Codable, Equatable {
 final class PromptStore: ObservableObject {
     @Published private(set) var prompts: [Prompt] = []
     @Published private(set) var shortcut = HotKey.defaultValue
+    @Published private(set) var compactShortcut = HotKey.compactDefaultValue
     @Published private(set) var storageError: String?
 
     private struct Library: Codable {
         var prompts: [Prompt]
         var shortcut: HotKey
+        // Older libraries omit this key.
+        var compactShortcut: HotKey?
+
+        var resolvedCompactShortcut: HotKey {
+            if let compactShortcut, compactShortcut != shortcut { return compactShortcut }
+            return shortcut == .compactDefaultValue ? .compactLegacyFallback : .compactDefaultValue
+        }
     }
 
     private let fileURL: URL
@@ -33,6 +41,7 @@ final class PromptStore: ObservableObject {
             let library = try JSONDecoder().decode(Library.self, from: data)
             prompts = library.prompts
             shortcut = library.shortcut
+            compactShortcut = library.resolvedCompactShortcut
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             prompts = Self.starterPrompts
         } catch {
@@ -49,14 +58,14 @@ final class PromptStore: ObservableObject {
         } else {
             updated.append(prompt)
         }
-        return save(Library(prompts: updated, shortcut: shortcut))
+        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut))
     }
 
     @discardableResult
     func remove(_ id: UUID) -> Bool {
         let updated = prompts.filter { $0.id != id }
         guard updated.count != prompts.count else { return true }
-        return save(Library(prompts: updated, shortcut: shortcut))
+        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut))
     }
 
     @discardableResult
@@ -73,12 +82,17 @@ final class PromptStore: ObservableObject {
         var updated = prompts
         let moved = updated.remove(at: sourceIndex)
         updated.insert(moved, at: insertionIndex)
-        return save(Library(prompts: updated, shortcut: shortcut))
+        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut))
     }
 
     @discardableResult
     func setShortcut(_ shortcut: HotKey) -> Bool {
-        save(Library(prompts: prompts, shortcut: shortcut))
+        save(Library(prompts: prompts, shortcut: shortcut, compactShortcut: compactShortcut))
+    }
+
+    @discardableResult
+    func setCompactShortcut(_ shortcut: HotKey) -> Bool {
+        save(Library(prompts: prompts, shortcut: self.shortcut, compactShortcut: shortcut))
     }
 
     func matching(_ query: String) -> [Prompt] {
@@ -98,6 +112,10 @@ final class PromptStore: ObservableObject {
 
     private func save(_ library: Library) -> Bool {
         guard !hasUnreadableLibrary else { return false }
+        guard library.compactShortcut != library.shortcut else {
+            storageError = "命令面板和简洁模式需要使用不同的快捷键。"
+            return false
+        }
 
         do {
             let data = try JSONEncoder().encode(library)
@@ -110,6 +128,7 @@ final class PromptStore: ObservableObject {
 
         prompts = library.prompts
         shortcut = library.shortcut
+        compactShortcut = library.resolvedCompactShortcut
         storageError = nil
         return true
     }
