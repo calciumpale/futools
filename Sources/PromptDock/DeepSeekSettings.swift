@@ -66,7 +66,7 @@ enum DeepSeekKeychain {
 
                 var attributes = query
                 attributes[kSecValueData as String] = data
-                attributes[kSecAttrLabel as String] = "Prompt Dock · DeepSeek API Key"
+                attributes[kSecAttrLabel as String] = "futools · DeepSeek API Key"
                 let added = SecItemAdd(attributes as CFDictionary, nil)
                 if added == errSecDuplicateItem {
                     try Self.check(SecItemUpdate(query as CFDictionary, changes))
@@ -117,12 +117,13 @@ private typealias CredentialState<Value> = SwiftUI.State<Value>
 
 @MainActor
 struct DeepSeekSettingsContent: View {
-    let colors: LibraryColors
+    let colors: DockColors
 
     @CredentialState private var input = ""
     @CredentialState private var hasKey: Bool?
     @CredentialState private var isBusy = false
     @CredentialState private var feedback: Feedback?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -136,6 +137,8 @@ struct DeepSeekSettingsContent: View {
                 Spacer()
                 Label(statusText, systemImage: hasKey == true ? "checkmark.circle.fill" : "circle.dotted")
                     .foregroundStyle(hasKey == true ? colors.accent : colors.secondary)
+                    .contentTransition(.opacity)
+                    .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: statusText)
             }
             HStack(spacing: 8) {
                 SecureField(hasKey == true ? "输入新密钥" : "输入密钥", text: $input)
@@ -157,11 +160,16 @@ struct DeepSeekSettingsContent: View {
                 }
             }
 
-            if let feedback {
-                Label(feedback.message, systemImage: feedback.isError ? "exclamationmark.circle" : "checkmark")
-                    .foregroundStyle(feedback.isError ? colors.warning : colors.accent)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack {
+                if let feedback {
+                    Label(feedback.message, systemImage: feedback.isError ? "exclamationmark.circle" : "checkmark")
+                        .foregroundStyle(feedback.isError ? colors.warning : colors.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .contentTransition(.opacity)
+                        .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+                }
             }
+            .animation(DockMotion.transition(reduceMotion: reduceMotion), value: feedback?.message)
         }
         .onAppear { run { try DeepSeekKeychain.exists() } }
         .onDisappear { input = "" }

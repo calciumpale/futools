@@ -1,12 +1,15 @@
 import AppKit
 import SwiftUI
 
+private typealias PromptListState<Value> = SwiftUI.State<Value>
+
 struct PromptListView: NSViewRepresentable {
     let prompts: [Prompt]
     let selectedID: UUID?
-    let colors: LibraryColors
+    let colors: DockColors
     let onSelect: (UUID) -> Void
     let onMove: (_ source: UUID, _ target: UUID, _ after: Bool) -> Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -51,7 +54,8 @@ struct PromptListView: NSViewRepresentable {
 
         func update(_ list: PromptListView, table: NSTableView) {
             let hasNewPrompts = self.list.prompts != list.prompts
-            let refreshCells = self.list.selectedID != list.selectedID || self.list.colors.dark != list.colors.dark
+            let refreshCells = self.list.selectedID != list.selectedID || self.list.colors.dark != list.colors.dark ||
+                self.list.reduceMotion != list.reduceMotion
             self.list = list
             if hasNewPrompts {
                 table.reloadData()
@@ -84,8 +88,9 @@ struct PromptListView: NSViewRepresentable {
                 prompt: prompt,
                 selected: prompt.id == list.selectedID,
                 colors: list.colors,
+                reduceMotion: list.reduceMotion,
                 handle: PromptHandleView(
-                    title: prompt.title, id: prompt.id,
+                    title: prompt.title, id: prompt.id, reduceMotion: list.reduceMotion,
                     up: row > 0 ? { [weak self] in self?.moveOne(prompt.id, down: false) ?? false } : nil,
                     down: row < list.prompts.count - 1 ? { [weak self] in self?.moveOne(prompt.id, down: true) ?? false } : nil
                 ),
@@ -136,9 +141,16 @@ struct PromptListView: NSViewRepresentable {
 private struct PromptRow: View {
     let prompt: Prompt
     let selected: Bool
-    let colors: LibraryColors
+    let colors: DockColors
+    let reduceMotion: Bool
     let handle: PromptHandleView
     let onSelect: () -> Void
+    @PromptListState private var hovered = false
+
+    private var background: Color {
+        if selected { return colors.selection }
+        return hovered ? colors.control.opacity(0.7) : .clear
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -148,7 +160,7 @@ private struct PromptRow: View {
                         .font(.system(size: 13, weight: .medium))
                         .frame(width: 29, height: 29)
                         .foregroundStyle(colors.accent)
-                        .background(colors.icon, in: RoundedRectangle(cornerRadius: 8))
+                        .background(colors.iconSelected, in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(prompt.title)
@@ -182,7 +194,14 @@ private struct PromptRow: View {
                 }
                 .padding(.trailing, 4)
         }
-        .background(selected ? colors.soft : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .background {
+            RoundedRectangle(cornerRadius: 9)
+                .fill(background)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: selected)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: hovered)
+        }
+        .onHover { hovered = $0 }
+        .onChange(of: prompt.id) { _ in hovered = false }
         .clipped()
     }
 }
@@ -190,6 +209,7 @@ private struct PromptRow: View {
 private struct PromptHandleView: NSViewRepresentable {
     let title: String
     let id: UUID
+    let reduceMotion: Bool
     let up: (() -> Bool)?
     let down: (() -> Bool)?
 
@@ -203,6 +223,7 @@ private struct PromptHandleView: NSViewRepresentable {
 
     func updateNSView(_ handle: PromptDragHandle, context: Context) {
         handle.id = id
+        handle.reduceMotion = reduceMotion
         let label = "拖动排序：\(title)"
         handle.setAccessibilityTitle(label)
         handle.setAccessibilityLabel(label)
@@ -218,6 +239,7 @@ private final class PromptDragHandle: NSView, NSDraggingSource {
 
     weak var table: NSTableView?
     var id: UUID?
+    var reduceMotion = false
     private(set) var draggingID: UUID?
     private var mouseDownLocation: NSPoint?
 
@@ -246,7 +268,7 @@ private final class PromptDragHandle: NSView, NSDraggingSource {
         self.table = table
         draggingID = id
         beginDraggingSession(with: [draggedItem], event: event, source: self)
-            .animatesToStartingPositionsOnCancelOrFail = true
+            .animatesToStartingPositionsOnCancelOrFail = !reduceMotion
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {

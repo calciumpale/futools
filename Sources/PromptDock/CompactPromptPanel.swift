@@ -19,6 +19,9 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     private var target: Target?
     private var sessionID = UUID()
     private var tracking: Task<Void, Never>?
+    private var targetObservation: AXObserver?
+    private var workspaceObservation: AnyCancellable?
+    private var targetUpdateQueued = false
     private var delivery: Task<Void, Never>?
     private var resultSubscription: AnyCancellable?
     private var revealAfter: ContinuousClock.Instant?
@@ -43,6 +46,7 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     deinit {
         tracking?.cancel()
         delivery?.cancel()
+        if let targetObservation { CFRunLoopSourceInvalidate(AXObserverGetRunLoopSource(targetObservation)) }
     }
 
     @discardableResult
@@ -65,9 +69,10 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         let panel = self.panel ?? makePanel(frame: frame)
         self.panel = panel
         panel.setFrame(frame, display: false)
-        panel.makeKeyAndOrderFront(nil)
+        DockWindowMotion.present(panel) { panel.makeKeyAndOrderFront(nil) }
         panel.focusSearch()
 
+        observeTarget(target)
         tracking = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
@@ -83,6 +88,10 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         target = nil
         tracking?.cancel()
         tracking = nil
+        if let targetObservation { CFRunLoopSourceInvalidate(AXObserverGetRunLoopSource(targetObservation)) }
+        targetObservation = nil
+        workspaceObservation = nil
+        targetUpdateQueued = false
         delivery?.cancel()
         delivery = nil
         yieldingToTarget = false
@@ -104,10 +113,43 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         cancelVoice()
     }
 
+    private func observeTarget(_ target: Target) {
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspaceObservation = Publishers.MergeMany([
+            NSWorkspace.didActivateApplicationNotification, NSWorkspace.didHideApplicationNotification,
+            NSWorkspace.didUnhideApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification,
+            NSWorkspace.didTerminateApplicationNotification
+        ].map { workspace.publisher(for: $0) }).sink { [weak self] _ in
+            DispatchQueue.main.async { self?.queueTargetUpdate() }
+        }
+
+        var observer: AXObserver?
+        let result = AXObserverCreate(target.application.processIdentifier, { _, _, _, context in
+            guard let context, Thread.isMainThread else { return }
+            let owner = Unmanaged<CompactPromptPanel>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated { owner.queueTargetUpdate() }
+        }, &observer)
+        guard result == .success, let observer else { return }
+        target.registerGeometryNotifications(observer, context: Unmanaged.passUnretained(self).toOpaque())
+        targetObservation = observer
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+    }
+
+    private func queueTargetUpdate() {
+        guard isEnabled, !targetUpdateQueued else { return }
+        targetUpdateQueued = true
+        let session = sessionID
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sessionID == session else { return }
+            self.targetUpdateQueued = false
+            self.trackTarget()
+        }
+    }
+
     private func makePanel(frame: NSRect) -> PaletteWindow {
         let panel = PaletteWindow(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
                                   backing: .buffered, defer: false)
-        panel.title = "Prompt Dock 精简面板"
+        panel.title = "futools 精简面板"
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.isOpaque = false
@@ -144,7 +186,7 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         voicePress.stop()
         voicePressAvailable = nil
         panel?.pendingEnter = nil
-        if panel?.isVisible == true { panel?.orderOut(nil) }
+        if let panel, panel.isVisible { DockWindowMotion.hide(panel) }
     }
 
     private func releaseKeyboardFocus() {
@@ -231,8 +273,10 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         let draft = optimizer.draft
         let session = sessionID
         optimizer.clearResult()
-        yieldingToTarget = true
-        hideWindow()
+        if panel?.isKeyWindow == true {
+            yieldingToTarget = true
+            hideWindow()
+        }
 
         delivery = Task { [weak self] in
             for _ in 0..<6 {
@@ -287,6 +331,16 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
 
         var isFrontmost: Bool {
             !application.isTerminated && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        }
+
+        func registerGeometryNotifications(_ observer: AXObserver, context: UnsafeMutableRawPointer) {
+            for notification in [kAXMovedNotification, kAXResizedNotification,
+                                 kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification] {
+                AXObserverAddNotification(observer, window, notification as CFString, context)
+            }
+            AXObserverAddNotification(observer, accessibilityApp, kAXFocusedWindowChangedNotification as CFString, context)
+            AXObserverAddNotification(observer, accessibilityApp, kAXFocusedUIElementChangedNotification as CFString, context)
+            AXObserverAddNotification(observer, composer ?? field, kAXLayoutChangedNotification as CFString, context)
         }
 
         var isCurrentWindow: Bool {

@@ -113,7 +113,7 @@ enum DeepSeekPromptAPI {
             switch self {
             case .emptyDraft: return "请输入要优化的提示词。"
             case .draftTooLong: return "提示词过长，请缩短后再试。"
-            case .missingKey: return "请先在 Prompt Dock 设置中保存 DeepSeek API Key。"
+            case .missingKey: return "请先在 futools 设置中保存 DeepSeek API Key。"
             case .keyUnavailable: return "无法从 macOS 钥匙串读取 DeepSeek API Key，请解锁钥匙串或在设置中重新保存。"
             case .authenticationFailed: return "DeepSeek 无法验证 API Key，请在设置中检查并更新密钥。"
             case .insufficientBalance: return "DeepSeek API 账户余额不足，请前往 DeepSeek 开放平台检查余额。"

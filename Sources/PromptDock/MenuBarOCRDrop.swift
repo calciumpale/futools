@@ -254,7 +254,8 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
         let size = state.panelSize
         let left = min(max(anchor.midX - size.width / 2, available.minX), available.maxX - size.width)
         let top = min(anchor.minY - 3, available.maxY)
-        panel.setFrame(NSRect(x: left, y: top - size.height, width: size.width, height: size.height), display: true)
+        let frame = NSRect(x: left, y: top - size.height, width: size.width, height: size.height)
+        if panel.frame != frame { panel.setFrame(frame, display: true) }
         if makeKey {
             panel.makeKeyAndOrderFront(nil)
         } else if !panel.isVisible {
@@ -265,7 +266,7 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
     private func makePanel() -> OCRDropPanel {
         let panel = OCRDropPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                                  backing: .buffered, defer: false)
-        panel.title = "Prompt Dock 截图识字"
+        panel.title = "futools 截图识字"
         panel.level = .floating
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
@@ -333,7 +334,7 @@ private final class OCRDropPanel: NSPanel {
 
 @MainActor
 private final class OCRDropState: ObservableObject {
-    enum Phase {
+    enum Phase: Hashable {
         case waiting
         case preparing
         case recognizing
@@ -344,9 +345,10 @@ private final class OCRDropState: ObservableObject {
     @Published var isHovering = false
     @Published var phase: Phase = .waiting
 
+    var displayPhase: Phase { isHovering ? .waiting : phase }
+
     var panelSize: CGSize {
-        if isHovering { return CGSize(width: 322, height: 138) }
-        switch phase {
+        switch displayPhase {
         case .waiting, .preparing, .recognizing: return CGSize(width: 322, height: 138)
         case .failed: return CGSize(width: 322, height: 179)
         case .result: return CGSize(width: 352, height: 261)
@@ -364,9 +366,10 @@ private struct OCRDropPopup: View {
     let onOpenText: (String) -> Void
 
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @OCRPopupState private var copyFeedback: String?
 
-    private var colors: LibraryColors { LibraryColors(dark: scheme == .dark) }
+    private var colors: DockColors { DockColors(dark: scheme == .dark) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -390,35 +393,43 @@ private struct OCRDropPopup: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .foregroundStyle(colors.ink)
-        .tint(colors.accent)
+        .tint(colors.action)
         .background(colors.surface, in: RoundedRectangle(cornerRadius: 13))
         .overlay {
             RoundedRectangle(cornerRadius: 13).strokeBorder(colors.line).allowsHitTesting(false)
         }
     }
 
-    @ViewBuilder private var content: some View {
-        if state.isHovering {
+    private var content: some View {
+        let phase = state.displayPhase
+        return ZStack {
+            content(for: phase)
+                .id(phase)
+                .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(state.isHovering ? nil : DockMotion.transition(reduceMotion: reduceMotion), value: phase)
+    }
+
+    @ViewBuilder private func content(for phase: OCRDropState.Phase) -> some View {
+        switch phase {
+        case .waiting:
             dropHint
-        } else {
-            switch state.phase {
-            case .waiting:
-                dropHint
-            case .preparing:
-                processing("正在读取截图…")
-            case .recognizing:
-                processing("DeepSeek 正在识别…")
-            case .result(let text):
-                result(text)
-            case .failed(let message, let canRetry):
-                failure(message, canRetry: canRetry)
-            }
+        case .preparing:
+            processing("正在读取截图…")
+        case .recognizing:
+            processing("正在识别截图…")
+        case .result(let text):
+            result(text)
+        case .failed(let message, let canRetry):
+            failure(message, canRetry: canRetry)
         }
     }
 
     private func processing(_ title: String) -> some View {
         HStack(spacing: 10) {
-            ProgressView().controlSize(.small).accessibilityHidden(true)
+            DockActivityGlyph(isBusy: true)
+                .foregroundStyle(colors.secondary)
             Text(title).font(.system(size: 13)).foregroundStyle(colors.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -433,7 +444,7 @@ private struct OCRDropPopup: View {
                 .foregroundStyle(colors.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colors.soft, in: RoundedRectangle(cornerRadius: 8))
+        .background(colors.selection, in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(colors.accent.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
@@ -454,9 +465,7 @@ private struct OCRDropPopup: View {
             .frame(maxHeight: .infinity)
             .background(colors.background, in: RoundedRectangle(cornerRadius: 8))
             HStack(spacing: 9) {
-                if let copyFeedback {
-                    Text(copyFeedback).font(.system(size: 11)).foregroundStyle(colors.secondary)
-                }
+                copyStatus
                 Spacer()
                 Button("复制文字") {
                     let board = NSPasteboard.general
@@ -469,6 +478,19 @@ private struct OCRDropPopup: View {
             .controlSize(.small)
         }
         .onAppear { copyFeedback = nil }
+    }
+
+    private var copyStatus: some View {
+        ZStack(alignment: .leading) {
+            if let copyFeedback {
+                Text(copyFeedback)
+                    .font(.system(size: 11))
+                    .foregroundStyle(colors.secondary)
+                    .id(copyFeedback)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: copyFeedback)
     }
 
     private func failure(_ message: String, canRetry: Bool) -> some View {

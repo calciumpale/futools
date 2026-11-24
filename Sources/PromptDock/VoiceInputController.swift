@@ -117,11 +117,11 @@ final class VoiceInputController: ObservableObject {
     private static func permissionProblem() -> String? {
         let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
         if microphone != .notDetermined && microphone != .authorized {
-            return "请在系统设置的「隐私与安全性 → 麦克风」中允许 Prompt Dock。"
+            return "请在系统设置的「隐私与安全性 → 麦克风」中允许 futools。"
         }
         let speech = SFSpeechRecognizer.authorizationStatus()
         if speech != .notDetermined && speech != .authorized {
-            return "请在系统设置的「隐私与安全性 → 语音识别」中允许 Prompt Dock。"
+            return "请在系统设置的「隐私与安全性 → 语音识别」中允许 futools。"
         }
         return nil
     }

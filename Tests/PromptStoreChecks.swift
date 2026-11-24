@@ -33,6 +33,21 @@ enum PromptStoreChecks {
 
         try expect(store.matching("  cafe\nＢＥＴＡ  ").map(\.id) == [first.id, second.id],
                    "Search did not match all normalized terms in library order.")
+        try expect(store.movePrompt(second.id, relativeTo: first.id, after: false), "Could not reorder search fixtures.")
+        try expect(store.matching("cafe beta").map(\.id) == [second.id, first.id], "Search kept the cached order after a move.")
+        var edited = second
+        edited.category = "计划"
+        try expect(store.upsert(edited), "Could not edit the indexed prompt.")
+        try expect(store.matching("cafe beta").map(\.id) == [first.id], "Search matched text removed by an edit.")
+        try expect(store.remove(first.id), "Could not delete the indexed prompt.")
+        try expect(store.matching("cafe beta").isEmpty, "Search kept a deleted prompt in its cache.")
+        let composed = Prompt(title: "组合字符", body: "👩‍💻 · 🇸🇬 · कि")
+        try expect(store.upsert(composed), "Could not save the compound-character fixture.")
+        try expect(store.matching("👩‍💻").map(\.id) == [composed.id], "Search lost a whole compound character.")
+        for fragment in ["💻", "🇬", "क"] {
+            try expect(!store.matching(fragment).contains(where: { $0.id == composed.id }),
+                       "Search matched a fragment of a compound character.")
+        }
         try expect(store.matching(" \n\t") == store.prompts, "A blank search did not show the library.")
     }
 

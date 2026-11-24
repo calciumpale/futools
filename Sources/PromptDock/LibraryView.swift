@@ -16,6 +16,7 @@ enum LibraryDestination {
 @MainActor
 struct LibraryView: View {
     private static let navigation = Notification.Name("PromptDock.libraryNavigation")
+    private static let applicationIcon = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
 
     @ObservedObject private var store: PromptStore
     private let shortcutRecorder: ShortcutRecorder
@@ -23,6 +24,7 @@ struct LibraryView: View {
     private let onSaveCompactShortcut: (HotKey) -> String?
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var titleFocused: Bool
     @ViewState private var draft: Draft?
     @ViewState private var showingSettings: Bool
@@ -52,21 +54,13 @@ struct LibraryView: View {
         NotificationCenter.default.post(name: navigation, object: destination)
     }
 
-    private var colors: LibraryColors { LibraryColors(dark: colorScheme == .dark) }
+    private var colors: DockColors { DockColors(dark: colorScheme == .dark) }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(colors.line).frame(height: 1)
-            if let error = store.storageError {
-                Label(error, systemImage: "exclamationmark.circle")
-                    .font(.callout)
-                    .foregroundStyle(colors.warning)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 10)
-                    .background(colors.soft)
-            }
+            storageNotice
             if showingSettings {
                 LibrarySettings(store: store, colors: colors, shortcutRecorder: shortcutRecorder,
                                 onSaveShortcut: onSaveShortcut, onSaveCompactShortcut: onSaveCompactShortcut)
@@ -76,7 +70,6 @@ struct LibraryView: View {
                     Rectangle().fill(colors.line).frame(width: 1)
                     if let draft = Binding($draft) {
                         editor(draft)
-                            .id(draft.wrappedValue.value.id)
                     } else {
                         emptyEditor
                     }
@@ -86,7 +79,7 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colors.background)
         .foregroundStyle(colors.ink)
-        .tint(colors.accent)
+        .tint(colors.action)
         .alert(item: $alert, content: makeAlert)
         .onReceive(NotificationCenter.default.publisher(for: Self.navigation)) { notification in
             if let destination = notification.object as? LibraryDestination { navigate(destination) }
@@ -96,15 +89,32 @@ struct LibraryView: View {
         }
     }
 
+    private var storageNotice: some View {
+        ZStack(alignment: .leading) {
+            if let error = store.storageError {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(colors.warning)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    .background(colors.selection)
+                    .id(error)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: store.storageError)
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
-            Image(systemName: "text.bubble")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(colors.accent)
+            Image(nsImage: Self.applicationIcon)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
                 .frame(width: 35, height: 35)
-                .background(colors.soft, in: RoundedRectangle(cornerRadius: 10))
                 .accessibilityHidden(true)
-            Text("Prompt Dock")
+            Text("futools")
                 .font(.system(size: 18, weight: .semibold))
             Spacer()
             HStack(spacing: 4) {
@@ -125,7 +135,11 @@ struct LibraryView: View {
                 .foregroundStyle(selected ? colors.accent : colors.secondary)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
-                .background(selected ? colors.surface : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .background {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(selected ? colors.surface : Color.clear)
+                        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: selected)
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -149,7 +163,7 @@ struct LibraryView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .frame(width: 27, height: 25)
                         .foregroundStyle(colors.accent)
-                        .background(colors.soft, in: RoundedRectangle(cornerRadius: 7))
+                        .background(colors.selection, in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.borderless)
                 .keyboardShortcut("n", modifiers: .command)
@@ -177,11 +191,27 @@ struct LibraryView: View {
 
     private func editor(_ draft: Binding<Draft>) -> some View {
         let entry = draft.wrappedValue
+        let isNew = entry.original == nil
         return VStack(alignment: .leading, spacing: 15) {
-            Text(entry.original == nil ? "新建提示词" : "编辑提示词")
-                .font(.system(size: 22, weight: .semibold))
-                .accessibilityAddTraits(.isHeader)
+            ZStack(alignment: .leading) {
+                Text(isNew ? "新建提示词" : "编辑提示词")
+                    .font(.system(size: 22, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                    .id(isNew)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+            .animation(DockMotion.transition(reduceMotion: reduceMotion), value: isNew)
+            editorFields(draft)
+                .id(entry.value.id)
+        }
+        .padding(.horizontal, 27)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
 
+    private func editorFields(_ draft: Binding<Draft>) -> some View {
+        let entry = draft.wrappedValue
+        return VStack(alignment: .leading, spacing: 15) {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
                     fieldLabel("名称")
@@ -234,11 +264,7 @@ struct LibraryView: View {
                     .help("删除此提示词")
                 }
                 Spacer(minLength: 0)
-                if entry.isDirty {
-                    Text("有未保存的修改").foregroundStyle(colors.secondary)
-                } else if let saveMessage {
-                    Label(saveMessage, systemImage: "checkmark").foregroundStyle(colors.accent)
-                }
+                editorStatus(isDirty: entry.isDirty)
                 Button("保存", action: save)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
@@ -248,9 +274,22 @@ struct LibraryView: View {
             .font(.system(size: 12))
             .frame(minHeight: 32)
         }
-        .padding(.horizontal, 27)
-        .padding(.vertical, 20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func editorStatus(isDirty: Bool) -> some View {
+        ZStack(alignment: .trailing) {
+            if isDirty {
+                Text("有未保存的修改")
+                    .foregroundStyle(colors.secondary)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            } else if let saveMessage {
+                Label(saveMessage, systemImage: "checkmark")
+                    .foregroundStyle(colors.accent)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: isDirty)
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: saveMessage)
     }
 
     private var emptyEditor: some View {
@@ -385,11 +424,12 @@ private struct LibrarySettings: View {
     }
 
     @ObservedObject var store: PromptStore
-    let colors: LibraryColors
+    let colors: DockColors
     @ObservedObject var shortcutRecorder: ShortcutRecorder
     let onSaveShortcut: (HotKey) -> String?
     let onSaveCompactShortcut: (HotKey) -> String?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewState private var recordingRow: ShortcutRow?
     @ViewState private var shortcutErrors: [ShortcutRow: String] = [:]
     @ViewState private var hasPermission = PasteService.hasPermission
@@ -406,7 +446,7 @@ private struct LibrarySettings: View {
                     .padding(.bottom, 2)
 
                 section("全局快捷键", icon: "command") {
-                    Text("在任意应用中呼出对应面板。再次按下同一快捷键可收起。")
+                    Text("用快捷键打开或关闭命令面板，也可开启或关闭精简模式。")
                         .foregroundStyle(colors.secondary)
                     shortcutControls(.command)
                     Divider()
@@ -414,23 +454,23 @@ private struct LibrarySettings: View {
                 }
 
                 section("外观", icon: "circle.lefthalf.filled") {
-                    Picker("外观模式", selection: $appearance) {
-                        ForEach(AppAppearance.allCases, id: \.rawValue) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+                    appearanceControls
                 }
 
                 section("辅助功能权限", icon: "accessibility") {
-                    Text("授权后，Prompt Dock 可以把提示词填入其他应用已经聚焦的输入框。")
+                    Text("授权后，futools 可以把提示词填入其他应用已经聚焦的输入框。")
                         .foregroundStyle(colors.secondary)
                     HStack {
-                        Label(hasPermission ? "已授权" : "待授权", systemImage: hasPermission ? "checkmark.circle.fill" : "circle.dotted")
-                            .foregroundStyle(hasPermission ? colors.accent : colors.secondary)
+                        ZStack(alignment: .leading) {
+                            Label(hasPermission ? "已授权" : "待授权", systemImage: hasPermission ? "checkmark.circle.fill" : "circle.dotted")
+                                .foregroundStyle(hasPermission ? colors.accent : colors.secondary)
+                                .id(hasPermission)
+                                .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+                        }
+                        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: hasPermission)
                         Spacer()
                         if !hasPermission {
-                            Button("打开系统设置", action: PasteService.requestPermission)
+                            SettingsButton(title: "打开系统设置", colors: colors, action: PasteService.requestPermission)
                         }
                     }
                 }
@@ -471,36 +511,77 @@ private struct LibrarySettings: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(colors.line).allowsHitTesting(false))
     }
 
+    private var appearanceControls: some View {
+        HStack(spacing: 8) {
+            appearanceControl(.system, symbol: "desktopcomputer")
+            appearanceControl(.light, symbol: "sun.max")
+            appearanceControl(.dark, symbol: "moon")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("外观模式")
+    }
+
+    private func appearanceControl(_ mode: AppAppearance, symbol: String) -> some View {
+        let selected = appearance == mode
+        return SettingsButton(
+            title: mode.title, colors: colors, tone: selected ? .selected : .neutral,
+            symbol: symbol, width: 100, height: 35
+        ) {
+            appearance = mode
+        }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
     private func shortcutControls(_ row: ShortcutRow) -> some View {
         let shortcut = currentShortcut(for: row)
         let recording = activeRow == row
+        let keyText = recording ? "按下快捷键…" : shortcut.display
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 9) {
                 Text(row.title)
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 64, alignment: .leading)
-                Text(recording ? "等待按键…" : shortcut.display)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(colors.accent)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 7)
-                    .background(colors.soft, in: RoundedRectangle(cornerRadius: 7))
-                    .accessibilityLabel(recording ? "等待录制\(row.title)快捷键" : "\(row.title)快捷键 \(shortcut.display)")
+                ZStack {
+                    Text(keyText)
+                        .id(keyText)
+                        .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+                }
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(colors.accent)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(recording ? colors.iconSelected : colors.selection)
+                }
+                .accessibilityLabel(recording ? "等待录制\(row.title)快捷键" : "\(row.title)快捷键 \(shortcut.display)")
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: keyText)
                 Spacer()
-                Button("恢复默认") { applyShortcut(row.defaultShortcut, for: row) }
+                SettingsButton(title: "恢复默认", colors: colors, width: 82) { applyShortcut(row.defaultShortcut, for: row) }
                     .disabled(activeRow != nil || shortcut == row.defaultShortcut)
                     .accessibilityLabel("恢复\(row.title)默认快捷键")
-                Button(recording ? "取消录制" : "录制快捷键") { toggleRecording(for: row) }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityLabel("\(recording ? "取消录制" : "录制")\(row.title)快捷键")
+                SettingsButton(
+                    title: recording ? "取消录制" : "录制快捷键", colors: colors,
+                    tone: recording ? .neutral : .primary, width: 94
+                ) {
+                    toggleRecording(for: row)
+                }
+                .accessibilityLabel("\(recording ? "取消录制" : "录制")\(row.title)快捷键")
             }
-            if let error = shortcutErrors[row] {
-                Label(error, systemImage: "exclamationmark.circle")
-                    .foregroundStyle(colors.warning)
-            } else if recording {
-                Text("按下组合键，例如 ⌃⌥P。按 Esc 取消。")
-                    .foregroundStyle(colors.secondary)
+            ZStack(alignment: .leading) {
+                if let error = shortcutErrors[row] {
+                    Label(error, systemImage: "exclamationmark.circle")
+                        .foregroundStyle(colors.warning)
+                        .id(error)
+                        .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+                } else if recording {
+                    Text("按下要保存的组合键，按 Esc 取消。")
+                        .foregroundStyle(colors.secondary)
+                        .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+                }
             }
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: shortcutErrors[row])
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: recording)
         }
     }
 
@@ -533,7 +614,7 @@ private struct LibrarySettings: View {
         } else if let shortcut = HotKey.capture(event) {
             applyShortcut(shortcut, for: row)
         } else {
-            shortcutErrors[row] = "请试试 ⌃⌥P 或 ⌘⇧P。复制、粘贴等常用快捷键已保留。"
+            shortcutErrors[row] = "请换用组合键，例如 ⌃⌥P 或 ⌘⇧P。"
         }
     }
 
@@ -544,8 +625,56 @@ private struct LibrarySettings: View {
     }
 }
 
+private struct SettingsButton: View {
+    enum Tone {
+        case neutral, primary, selected
+    }
+
+    let title: String
+    let colors: DockColors
+    var tone: Tone = .neutral
+    var symbol: String?
+    var width: CGFloat?
+    var height: CGFloat = 32
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 8)
+        let (foreground, fill, border) = style
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .accessibilityHidden(true)
+                }
+                Text(title)
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(foreground)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(width: width, height: height)
+            .background(fill, in: shape)
+            .overlay { shape.strokeBorder(border).allowsHitTesting(false) }
+            .contentShape(shape)
+        }
+        .buttonStyle(DockPressStyle())
+    }
+
+    private var style: (foreground: Color, fill: Color, border: Color) {
+        guard isEnabled else { return (colors.secondary.opacity(0.66), colors.control.opacity(0.55), colors.line) }
+        switch tone {
+        case .neutral: return (colors.ink, colors.control, colors.outline)
+        case .primary: return (.white, colors.action, .clear)
+        case .selected: return (colors.accent, colors.selection, colors.accent.opacity(0.42))
+        }
+    }
+}
+
 private struct LibraryField: ViewModifier {
-    let colors: LibraryColors
+    let colors: DockColors
 
     func body(content: Content) -> some View {
         content
@@ -556,31 +685,6 @@ private struct LibraryField: ViewModifier {
             .background(colors.surface, in: RoundedRectangle(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(colors.line).allowsHitTesting(false))
     }
-}
-
-struct LibraryColors {
-    let dark: Bool
-
-    private func color(_ light: UInt32, _ darkValue: UInt32) -> Color {
-        let value = dark ? darkValue : light
-        return Color(
-            red: Double((value >> 16) & 255) / 255,
-            green: Double((value >> 8) & 255) / 255,
-            blue: Double(value & 255) / 255
-        )
-    }
-
-    var background: Color { color(0xF7F5EF, 0x222623) }
-    var sidebar: Color { color(0xF1EFE8, 0x1C211E) }
-    var surface: Color { color(0xFFFEFA, 0x2B302C) }
-    var ink: Color { color(0x232D27, 0xF0F3ED) }
-    var secondary: Color { color(0x59675E, 0xA8B4AC) }
-    var accent: Color { color(0x166651, 0x89D9BA) }
-    var soft: Color { color(0xE0EEE5, 0x30453B) }
-    var icon: Color { color(0xDAE9DF, 0x34493E) }
-    var line: Color { color(0xDADFD6, 0x404943) }
-    var control: Color { color(0xEAEDE5, 0x1B221D) }
-    var warning: Color { color(0x9E4B22, 0xFFBC89) }
 }
 
 @MainActor

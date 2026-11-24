@@ -78,7 +78,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let menu = NSMenu()
         let app = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "退出 Prompt Dock", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "退出 futools", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         app.submenu = appMenu
         menu.addItem(app)
 
@@ -105,11 +105,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func makeStatusMenu() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Prompt Dock")
+        let image = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png")
+            .flatMap { NSImage(contentsOf: $0) }
+            ?? NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "futools")
+        image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
         item.button?.image = image
-        item.button?.toolTip = "Prompt Dock · 拖入截图识别"
-        item.button?.setAccessibilityLabel("Prompt Dock")
+        item.button?.toolTip = "futools · 拖入截图识别"
+        item.button?.setAccessibilityLabel("futools")
 
         let menu = NSMenu()
         menu.delegate = self
@@ -119,7 +122,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         addMenuItem("新建提示词…", action: #selector(newPrompt), to: menu)
         menu.addItem(.separator())
         addMenuItem("设置…", action: #selector(openSettings), to: menu)
-        addMenuItem("退出 Prompt Dock", action: #selector(quit), to: menu)
+        addMenuItem("退出 futools", action: #selector(quit), to: menu)
         item.menu = menu
         statusItem = item
         if let button = item.button {
@@ -279,7 +282,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             backing: .buffered,
             defer: false
         )
-        window.title = "Prompt Dock"
+        window.title = "futools"
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 820, height: 520)
         shortcutRecorder.attach(to: window)
@@ -331,18 +334,22 @@ private final class ClipboardToast {
     func show(_ text: String, symbol: String) {
         dismiss()
         guard let screen = screenUnderCursor() else { return }
+        let usable = screen.visibleFrame
         let view = HStack(spacing: 10) {
             Image(systemName: symbol).imageScale(.medium)
-            Text(text).font(.system(size: 13, weight: .medium))
+            Text(text)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .background(.regularMaterial, in: Capsule())
-        .overlay { Capsule().strokeBorder(.primary.opacity(0.10), lineWidth: 1) }
-        .fixedSize()
+        .frame(maxWidth: min(400, max(1, usable.width - 24)))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.10), lineWidth: 1) }
+        .fixedSize(horizontal: false, vertical: true)
         let host = NSHostingView(rootView: view)
         let size = host.fittingSize
-        let usable = screen.visibleFrame
         let frame = NSRect(x: usable.midX - size.width / 2, y: usable.minY + 52,
                            width: size.width, height: size.height)
         let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
@@ -352,21 +359,24 @@ private final class ClipboardToast {
         panel.hasShadow = true
         panel.level = .floating
         panel.ignoresMouseEvents = true
+        panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.contentView = host
-        panel.orderFrontRegardless()
+        DockWindowMotion.present(panel) { panel.orderFrontRegardless() }
         self.panel = panel
-        hideTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
-            self?.dismiss()
+        hideTask = Task { @MainActor [weak self, weak panel] in
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            guard let self, let panel else { return }
+            let exitDuration = DockWindowMotion.fadePassiveWindow(panel)
+            do { try await Task.sleep(for: .seconds(exitDuration)) } catch { return }
+            self.dismiss()
         }
     }
 
     func dismiss() {
         hideTask?.cancel()
         hideTask = nil
-        panel?.orderOut(nil)
+        if let panel { DockWindowMotion.hide(panel) }
         panel = nil
     }
 }

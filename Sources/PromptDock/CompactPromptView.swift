@@ -3,8 +3,8 @@ import SwiftUI
 
 @MainActor
 struct CompactPromptView: View {
-    static let baseHeight: CGFloat = 64
-    private static let feedbackHeight: CGFloat = 37
+    static let baseHeight: CGFloat = 48
+    private static let feedbackHeight: CGFloat = 34
 
     @ObservedObject var optimizer: PromptOptimizer
     @ObservedObject var voice: VoiceInputController
@@ -16,6 +16,9 @@ struct CompactPromptView: View {
     let onCancelVoice: () -> Void
 
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var colors: DockColors { DockColors(dark: scheme == .dark) }
 
     private var canOptimize: Bool {
         voice.phase == .idle && !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -33,80 +36,85 @@ struct CompactPromptView: View {
                    let feedback = Self.feedback(optimizer: optimizer, voice: voice) {
                     Text(feedback.text)
                         .font(.system(size: 12))
-                        .foregroundStyle(feedback.isError ? Color(nsColor: .systemRed) : Color.secondary)
+                        .contentTransition(.opacity)
+                        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: feedback.text)
+                        .foregroundStyle(feedback.isError ? colors.warning : colors.secondary)
                         .lineLimit(2)
                         .help(feedback.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 13)
+                        .padding(.horizontal, 14)
                         .frame(height: Self.feedbackHeight)
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(colors.line).frame(height: 1)
+                        }
                 }
 
-                inputRow
+                inputRow(showsActionIcon: geometry.size.width >= 280)
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottomLeading)
         }
-        .background {
-            shape.fill(scheme == .dark ? Color.black.opacity(0.10) : Color.white.opacity(0.17))
-                .background(.regularMaterial, in: shape)
-        }
+        .background(colors.surface, in: shape)
         .overlay {
-            shape.strokeBorder(Color.primary.opacity(scheme == .dark ? 0.18 : 0.12), lineWidth: 1)
+            shape.strokeBorder(colors.outline, lineWidth: 1)
                 .allowsHitTesting(false)
         }
+        .tint(colors.action)
     }
 
-    private var inputRow: some View {
-        HStack(spacing: 8) {
-            VoicePressButton(
-                phase: voice.phase, isEnabled: !optimizer.isOptimizing, canPressAnywhere: canPressAnywhere,
-                onBegin: onBeginVoice, onEnd: onEndVoice, onCancel: onCancelVoice, style: .compact
-            )
-
+    private func inputRow(showsActionIcon: Bool) -> some View {
+        HStack(spacing: 10) {
             PaletteTextEditor(
-                text: $optimizer.draft, label: "提示词草稿", fontSize: 15,
-                textColor: Color(nsColor: .labelColor), accentColor: .accentColor, placeholder: "输入提示词",
+                text: $optimizer.draft, label: "提示词草稿", fontSize: 14,
+                textColor: colors.ink, accentColor: colors.accent, placeholder: "输入提示词",
+                placeholderColor: colors.secondary, fixedViewportHeight: 32,
                 isSearchEditor: true, onOptimize: optimizeFromKeyboard
             )
             .frame(maxWidth: .infinity)
-            .frame(height: PaletteTextEditor.searchMinimumHeight)
-            .padding(.horizontal, 8)
-            .background(Color.primary.opacity(scheme == .dark ? 0.08 : 0.045), in: RoundedRectangle(cornerRadius: 8))
 
-            optimizeButton
+            HStack(spacing: 5) {
+                VoicePressButton(
+                    phase: voice.phase, isEnabled: !optimizer.isOptimizing, canPressAnywhere: canPressAnywhere,
+                    onBegin: onBeginVoice, onEnd: onEndVoice, onCancel: onCancelVoice, style: .compact
+                )
+                optimizeButton(showsIcon: showsActionIcon)
+            }
         }
-        .padding(.horizontal, 11)
+        .padding(.leading, 14)
+        .padding(.trailing, 9)
         .frame(height: Self.baseHeight)
     }
 
-    @ViewBuilder private var optimizeButton: some View {
-        if optimizer.isOptimizing {
-            Button(action: optimizer.cancel) {
-                HStack(spacing: 5) {
-                    ProgressView().controlSize(.small).accessibilityHidden(true)
-                    Text("取消")
+    private func optimizeButton(showsIcon: Bool) -> some View {
+        let isReady = canOptimize && !optimizer.isOptimizing
+        return Button {
+            if optimizer.isOptimizing { optimizer.cancel() } else { optimize() }
+        } label: {
+            HStack(spacing: 5) {
+                if showsIcon || optimizer.isOptimizing {
+                    DockActivityGlyph(isBusy: optimizer.isOptimizing, idleSymbol: "sparkles")
                 }
-                .frame(minWidth: 44)
+                Text(optimizer.isOptimizing ? "取消优化" : "优化提示词")
+                    .contentTransition(.opacity)
+                    .lineLimit(1)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .accessibilityLabel("取消优化")
-        } else {
-            Button(action: optimize) {
-                Text("优化提示词")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!canOptimize)
-            .accessibilityLabel("优化提示词")
-            .help("优化提示词（⌘↩）")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(isReady ? Color.white : colors.secondary)
+            .frame(width: showsIcon ? 94 : 72, height: 30)
+            .background(isReady ? colors.action : colors.control, in: RoundedRectangle(cornerRadius: 8))
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: optimizer.isOptimizing)
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: isReady)
         }
+        .buttonStyle(DockPressStyle())
+        .disabled(!canOptimize && !optimizer.isOptimizing)
+        .accessibilityLabel(optimizer.isOptimizing ? "取消优化" : "优化提示词")
+        .help(optimizer.isOptimizing ? "取消本次优化" : "优化提示词（⌘↩）")
     }
 
     private static func feedback(optimizer: PromptOptimizer, voice: VoiceInputController) -> Feedback? {
         switch voice.phase {
-        case .requestingPermission: return Feedback(text: "等待语音授权…")
-        case .recording: return Feedback(text: voice.message ?? "正在听，松开后转写")
-        case .finishing: return Feedback(text: "正在转写…")
+        case .requestingPermission: return Feedback(text: "等待麦克风和语音识别授权…")
+        case .recording: return Feedback(text: voice.message ?? "正在录音，松开后转写")
+        case .finishing: return Feedback(text: "正在转写语音…")
         case .idle:
             if let error = optimizer.errorMessage { return Feedback(text: error, isError: true) }
             return voice.message.map { Feedback(text: $0) }

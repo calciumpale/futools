@@ -14,46 +14,57 @@ struct VoicePressButton: View {
     var style: Style = .standard
 
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var colors: LibraryColors { LibraryColors(dark: scheme == .dark) }
+    private var colors: DockColors { DockColors(dark: scheme == .dark) }
     private var isRecording: Bool { phase == .recording }
     private var recordingColor: Color {
         if style == .compact { return Color(nsColor: .systemRed) }
         return scheme == .dark ? Color(red: 1, green: 0.6, blue: 0.57) : Color(red: 0.67, green: 0.21, blue: 0.18)
     }
-    private var idleColor: Color { style == .compact ? .secondary : colors.accent }
-    private var buttonWidth: CGFloat { style == .compact ? 28 : 32 }
+    private var idleColor: Color { style == .compact ? colors.secondary : colors.accent }
+    private var buttonHeight: CGFloat { style == .compact ? 32 : PaletteTextEditor.searchMinimumHeight }
 
     var body: some View {
         ZStack {
-            if style == .standard || isRecording {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(isRecording ? recordingColor.opacity(0.13) : colors.control)
-                    .frame(width: buttonWidth, height: 29)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
-
-            if phase == .requestingPermission || phase == .finishing {
-                ProgressView()
-                    .controlSize(.small)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            } else {
-                Image(systemName: isRecording ? "mic.fill" : "mic")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isRecording ? recordingColor : idleColor)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+            decoration
+                .opacity(isEnabled ? 1 : 0.45)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: phase)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: isEnabled)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
 
             VoicePressSurface(
                 phase: phase, isEnabled: isEnabled, canPressAnywhere: canPressAnywhere,
                 onBegin: onBegin, onEnd: onEnd, onCancel: onCancel
             )
         }
-        .frame(width: buttonWidth, height: PaletteTextEditor.searchMinimumHeight)
-        .opacity(isEnabled ? 1 : 0.45)
+        .frame(width: 32, height: buttonHeight)
+    }
+
+    private var decoration: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7)
+                .fill(isRecording ? recordingColor.opacity(0.13) : colors.control)
+                .frame(width: style == .compact ? 28 : 32, height: 29)
+                .opacity(style == .standard || isRecording ? 1 : 0)
+
+            Image(systemName: "mic")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(idleColor)
+                .opacity(phase == .idle ? 1 : 0)
+
+            Image(systemName: "mic.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(recordingColor)
+                .opacity(isRecording ? 1 : 0)
+
+            if phase == .requestingPermission || phase == .finishing {
+                DockActivityGlyph(isBusy: true)
+                    .foregroundStyle(idleColor)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+        }
     }
 }
 

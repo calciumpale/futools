@@ -12,11 +12,15 @@ struct PaletteTextEditor: NSViewRepresentable {
     let textColor: Color
     let accentColor: Color
     var placeholder = ""
+    var placeholderColor: Color?
+    var fixedViewportHeight: CGFloat?
     var isSearchEditor = false
     var onCommand: ((Selector) -> Bool)?
     var onOptimize: (() -> Void)?
     var onFocus: (() -> Void)?
     var onPasteImage: ((NSPasteboard) -> Bool)?
+
+    @Environment(\.colorScheme) private var scheme
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorScrollView()
@@ -33,8 +37,12 @@ struct PaletteTextEditor: NSViewRepresentable {
         editor.textContainer?.containerSize = NSSize(width: 0, height: unbounded)
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainerInset = NSSize(width: 1, height: isSearchEditor ? 9 : 5)
-        editor.font = .systemFont(ofSize: fontSize, weight: isSearchEditor ? .medium : .regular)
+        let font = NSFont.systemFont(ofSize: fontSize, weight: isSearchEditor ? .medium : .regular)
+        let verticalInset = fixedViewportHeight.map {
+            max(0, floor(($0 - NSLayoutManager().defaultLineHeight(for: font)) / 2))
+        } ?? (isSearchEditor ? 9 : 5)
+        editor.textContainerInset = NSSize(width: 1, height: verticalInset)
+        editor.font = font
         editor.isRichText = false
         editor.drawsBackground = false
         editor.allowsUndo = true
@@ -58,20 +66,30 @@ struct PaletteTextEditor: NSViewRepresentable {
         editor.onOptimize = onOptimize
         editor.onFocus = onFocus
         editor.onPasteImage = onPasteImage
+        let hintColor = placeholderColor.map { NSColor($0) } ?? .placeholderTextColor
+        if editor.placeholderColor != hintColor {
+            editor.placeholderColor = hintColor
+            editor.needsDisplay = true
+        }
         let color = NSColor(textColor)
         if editor.textColor != color { editor.textColor = color }
         editor.insertionPointColor = NSColor(accentColor)
+        let selectionColor = NSColor(DockColors(dark: scheme == .dark).iconSelected)
+        if editor.selectedTextAttributes[.backgroundColor] as? NSColor != selectionColor {
+            editor.selectedTextAttributes = [.backgroundColor: selectionColor]
+        }
         if !editor.hasMarkedText(), editor.string != text {
             editor.string = text
             editor.undoManager?.removeAllActions()
             editor.scrollRangeToVisible(NSRange(location: 0, length: 0))
-            if isSearchEditor { scroll.invalidateIntrinsicContentSize() }
+            if isSearchEditor, fixedViewportHeight == nil { scroll.invalidateIntrinsicContentSize() }
         }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
-        guard isSearchEditor, let width = proposal.width, width.isFinite,
-              let editor = nsView.documentView as? NSTextView, let font = editor.font else { return nil }
+        guard isSearchEditor, let width = proposal.width, width.isFinite else { return nil }
+        if let fixedViewportHeight { return CGSize(width: width, height: fixedViewportHeight) }
+        guard let editor = nsView.documentView as? NSTextView, let font = editor.font else { return nil }
 
         let inset = editor.textContainerInset
         let height = context.coordinator.searchHeight(
@@ -92,7 +110,9 @@ struct PaletteTextEditor: NSViewRepresentable {
             guard let view = notification.object as? NSTextView, !view.hasMarkedText(),
                   view.string != parent.text else { return }
             parent.text = view.string
-            if parent.isSearchEditor { view.enclosingScrollView?.invalidateIntrinsicContentSize() }
+            if parent.isSearchEditor, parent.fixedViewportHeight == nil {
+                view.enclosingScrollView?.invalidateIntrinsicContentSize()
+            }
         }
 
         fileprivate func searchHeight(text: String, font: NSFont, width: CGFloat, verticalInset: CGFloat) -> CGFloat {
@@ -163,6 +183,7 @@ struct PaletteTextEditor: NSViewRepresentable {
     private final class Editor: NSTextView {
         var isSearchEditor = false
         var placeholder = ""
+        var placeholderColor = NSColor.placeholderTextColor
         var onOptimize: (() -> Void)?
         var onFocus: (() -> Void)?
         var onPasteImage: ((NSPasteboard) -> Bool)?
@@ -193,7 +214,7 @@ struct PaletteTextEditor: NSViewRepresentable {
             (placeholder as NSString).draw(
                 with: bounds.insetBy(dx: inset.width, dy: inset.height),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: font ?? NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.placeholderTextColor]
+                attributes: [.font: font ?? NSFont.systemFont(ofSize: 14), .foregroundColor: placeholderColor]
             )
         }
 

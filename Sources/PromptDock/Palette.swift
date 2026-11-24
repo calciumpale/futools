@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class PaletteController: NSObject, NSWindowDelegate {
@@ -18,13 +19,15 @@ final class PaletteController: NSObject, NSWindowDelegate {
         super.init()
         model.performInsert = { [weak self] text in self?.insert(text) }
         model.navigate = { [weak self] destination in self?.onNavigate?(destination) }
-        model.cancel = { [weak self] in self?.dismiss() }
         model.focusSearch = { [weak self] in self?.window?.focusSearch() }
         model.handleSearchCommand = { [weak self] command in
             self?.handleSearchCommand(command) ?? false
         }
         model.beginVoiceInput = { [weak self] in self?.beginVoiceInput() }
-        model.acceptRecognizedText = { [weak self] text in self?.insertIntoDraft(text) }
+        model.prepareSearchForOCR = { [weak self] in
+            self?.window?.pendingEnter = nil
+            self?.window?.searchField?.unmarkText()
+        }
         voicePress.canBegin = { [weak self] in
             guard let self else { return false }
             return self.isVisible && self.window?.isKeyWindow == true &&
@@ -47,10 +50,13 @@ final class PaletteController: NSObject, NSWindowDelegate {
         self.window = window
 
         let area = screen.visibleFrame
-        let size = window.frame.size
+        let size = NSSize(width: min(PaletteView.width, max(1, area.width - 24)),
+                          height: min(PaletteView.height, max(1, area.height - 20)))
         let top = min(max((area.height - size.height) * 0.26, 12), 150)
-        window.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.maxY - size.height - top))
-        window.makeKeyAndOrderFront(nil)
+        let frame = NSRect(x: area.midX - size.width / 2, y: max(area.minY, area.maxY - size.height - top),
+                           width: size.width, height: size.height)
+        window.setFrame(frame, display: false)
+        DockWindowMotion.present(window) { window.makeKeyAndOrderFront(nil) }
         window.focusSearch()
         window.invalidateShadow()
         model.canPressAnywhere = voicePress.start()
@@ -63,7 +69,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
         if !keepVoiceAuthorization || model.voice.phase != .requestingPermission {
             model.voice.cancel()
         }
-        window?.orderOut(nil)
+        if let window { DockWindowMotion.hide(window) }
         model.optimizer.cancel()
         target = nil
     }
@@ -114,7 +120,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Prompt Dock 命令面板"
+        window.title = "futools 命令面板"
         window.isFloatingPanel = true
         window.level = .floating
         window.isOpaque = false
@@ -128,9 +134,11 @@ final class PaletteController: NSObject, NSWindowDelegate {
         window.delegate = self
         window.onCancel = { [weak self] in self?.dismiss() }
         window.onConfirm = { [weak self] in self?.model.confirmSelection() }
-        window.contentView = NSHostingView(rootView: PaletteView(
+        let host = NSHostingView(rootView: PaletteView(
             model: model, store: model.store, optimizer: model.optimizer, voice: model.voice
         ))
+        host.sizingOptions = []
+        window.contentView = host
         return window
     }
 
@@ -200,22 +208,22 @@ private final class PaletteModel: ObservableObject {
     private let recognizeScreenshot: @Sendable (OCRImage) async throws -> String
     private var recognitionTask: Task<Void, Never>?
     @Published private(set) var screenshot: OCRImage?
+    @Published private(set) var showsOCR = false
     @Published private(set) var isRecognizing = false
     @Published private(set) var screenshotError: String?
+    @Published private(set) var screenshotAttachmentError: String?
+    @Published var ocrResult = ""
     private(set) var screenshotPreview: NSImage?
     @Published private(set) var selectedID: UUID?
-    @Published private(set) var targetName: String?
-    @Published private(set) var targetIcon: NSImage?
-    @Published private(set) var hasPermission = false
+    @Published private(set) var insertionTargetIcon: NSImage?
     @Published var canPressAnywhere = false
 
     var performInsert: ((String) -> Void)?
     var navigate: ((LibraryDestination) -> Void)?
-    var cancel: (() -> Void)?
     var focusSearch: (() -> Void)?
     var handleSearchCommand: ((Selector) -> Bool)?
     var beginVoiceInput: (() -> Void)?
-    var acceptRecognizedText: ((String) -> Void)?
+    var prepareSearchForOCR: (() -> Void)?
 
     init(store: PromptStore, optimizer: PromptOptimizer,
          recognizeScreenshot: @escaping @Sendable (OCRImage) async throws -> String) {
@@ -227,24 +235,28 @@ private final class PaletteModel: ObservableObject {
     var matches: [Prompt] { store.matching(optimizer.draft) }
     var selectedPrompt: Prompt? { matches.first { $0.id == selectedID } }
     var navigatesMatches: Bool {
-        !optimizer.draft.contains(where: \.isNewline) && !matches.isEmpty
+        !showsOCR && !optimizer.draft.contains(where: \.isNewline) && !matches.isEmpty
     }
     var canOptimize: Bool {
-        voice.phase == .idle && !isRecognizing && !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !showsOCR && voice.phase == .idle && !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     var canStartVoice: Bool { voice.phase == .idle && !optimizer.isOptimizing && !isRecognizing }
-    var canRecognize: Bool { screenshot != nil && canStartVoice }
+    var canRecognize: Bool { screenshot != nil && canStartVoice && (!showsOCR || screenshotError != nil) }
     var insertionText: String? {
         guard !optimizer.isOptimizing, !isRecognizing, voice.phase == .idle else { return nil }
+        if showsOCR {
+            guard screenshotError == nil, !ocrResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return ocrResult
+        }
         if let selectedPrompt { return selectedPrompt.body }
         let text = optimizer.hasResult ? optimizer.result : optimizer.draft
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
     }
 
     func prepare(for target: NSRunningApplication?) {
-        targetName = target.map { $0.localizedName ?? "当前应用" }
-        targetIcon = target?.icon
-        hasPermission = PasteService.hasPermission
+        insertionTargetIcon = PasteService.hasPermission ? target.map {
+            $0.icon ?? NSWorkspace.shared.icon(for: .application)
+        } : nil
         optimizer.reset()
         removeScreenshot()
         if voice.phase != .requestingPermission { voice.cancel() }
@@ -253,6 +265,7 @@ private final class PaletteModel: ObservableObject {
 
     func setDraft(_ value: String) {
         guard optimizer.draft != value else { return }
+        if showsOCR { removeScreenshot() }
         optimizer.draft = value
         optimizer.clearResult()
         selectedID = matches.first?.id
@@ -266,7 +279,7 @@ private final class PaletteModel: ObservableObject {
             screenshotPreview = image.preview
             screenshot = image
         } catch {
-            screenshotError = error.localizedDescription
+            screenshotAttachmentError = error.localizedDescription
         }
         return true
     }
@@ -274,23 +287,33 @@ private final class PaletteModel: ObservableObject {
     func removeScreenshot() {
         recognitionTask?.cancel()
         recognitionTask = nil
+        if showsOCR { selectedID = matches.first?.id }
+        showsOCR = false
         screenshot = nil
         screenshotPreview = nil
         screenshotError = nil
+        screenshotAttachmentError = nil
+        ocrResult = ""
         isRecognizing = false
     }
 
     func runOCR() {
         guard canRecognize, let screenshot else { return }
+        prepareSearchForOCR?()
+        optimizer.reset()
+        selectedID = nil
+        screenshotAttachmentError = nil
         screenshotError = nil
+        ocrResult = ""
         isRecognizing = true
+        showsOCR = true
         recognitionTask = Task { [weak self, recognizeScreenshot] in
             do {
                 let text = try await recognizeScreenshot(screenshot)
                 guard !Task.isCancelled, let self else { return }
                 self.recognitionTask = nil
-                self.removeScreenshot()
-                self.acceptRecognizedText?(text)
+                self.ocrResult = text
+                self.isRecognizing = false
             } catch {
                 guard !Task.isCancelled, let self else { return }
                 self.recognitionTask = nil
@@ -330,35 +353,46 @@ private struct PaletteView: View {
     @ObservedObject var optimizer: PromptOptimizer
     @ObservedObject var voice: VoiceInputController
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var colors: PaletteColors { PaletteColors(dark: scheme == .dark) }
+    private var colors: DockColors { DockColors(dark: scheme == .dark) }
 
     var body: some View {
+        GeometryReader { geometry in
+            panel(resultWidth: min(308, floor(geometry.size.width * 0.455)))
+        }
+    }
+
+    private func panel(resultWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
             searchBar
-            screenshotStatus
-            voiceStatus
+            statusArea
             separator
             HStack(spacing: 0) {
-                results.frame(width: 308)
+                Group {
+                    if model.showsOCR {
+                        PaletteOCRImagePane(image: model.screenshotPreview, colors: colors)
+                    } else {
+                        results
+                    }
+                }
+                .frame(width: resultWidth)
                 Rectangle().fill(colors.line).frame(width: 1)
-                preview
+                if model.showsOCR {
+                    PaletteOCRResultPane(
+                        text: $model.ocrResult, isRecognizing: model.isRecognizing,
+                        error: model.screenshotError, colors: colors, onRetry: model.runOCR
+                    )
+                } else {
+                    preview
+                }
             }
             .frame(maxHeight: .infinity)
-            if let error = optimizer.errorMessage {
-                Label(error, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(colors.warning)
-                    .lineLimit(2)
-                    .help(error)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 17)
-                    .padding(.vertical, 7)
-            }
+            optimizationError
             separator
             footer
         }
-        .frame(width: Self.width, height: Self.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(colors.ink)
         .background(colors.surface)
         .clipShape(RoundedRectangle(cornerRadius: 19))
@@ -371,12 +405,39 @@ private struct PaletteView: View {
 
     private var separator: some View { Rectangle().fill(colors.line).frame(height: 1) }
 
+    private var statusArea: some View {
+        VStack(spacing: 0) {
+            screenshotStatus
+            voiceStatus
+        }
+        .animation(DockMotion.transition(reduceMotion: reduceMotion), value: model.screenshot != nil)
+        .animation(DockMotion.transition(reduceMotion: reduceMotion), value: model.screenshotAttachmentError)
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: voiceStatusText)
+    }
+
+    private var optimizationError: some View {
+        VStack(spacing: 0) {
+            if let error = optimizer.errorMessage {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(colors.warning)
+                    .lineLimit(2)
+                    .help(error)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 17)
+                    .padding(.vertical, 7)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(DockMotion.transition(reduceMotion: reduceMotion), value: optimizer.errorMessage)
+    }
+
     private var voiceStatusText: String? {
         switch voice.phase {
         case .idle: return voice.message
-        case .requestingPermission: return "等待系统授权…"
-        case .recording: return voice.message ?? "正在听，松开后转成文字"
-        case .finishing: return "正在转成文字…"
+        case .requestingPermission: return "等待麦克风和语音识别授权…"
+        case .recording: return voice.message ?? "正在录音，松开后转写"
+        case .finishing: return "正在转写语音…"
         }
     }
 
@@ -385,10 +446,12 @@ private struct PaletteView: View {
         if let text = voiceStatusText {
             Text(text)
                 .font(.system(size: 12))
-                .foregroundStyle(voice.phase == .recording ? colors.accent : colors.dim)
+                .contentTransition(.opacity)
+                .foregroundStyle(voice.phase == .recording ? colors.accent : colors.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 19)
                 .padding(.bottom, 7)
+                .transition(DockMotion.reveal(reduceMotion: reduceMotion))
         }
     }
 
@@ -418,49 +481,55 @@ private struct PaletteView: View {
                 onPasteImage: model.pasteScreenshot
             )
             .frame(maxWidth: .infinity)
-            if !optimizer.draft.isEmpty {
-                Button {
-                    model.setDraft("")
-                    model.focusSearch?()
-                } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 14))
-                        .foregroundStyle(colors.dim)
-                        .frame(width: 24, height: 28)
-                }
-                .buttonStyle(.plain)
-                .frame(height: PaletteTextEditor.searchMinimumHeight)
-                .accessibilityLabel("清空输入")
-            }
+            clearButton
             ocrButton.frame(height: PaletteTextEditor.searchMinimumHeight)
             Button { model.navigate?(.library) } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(colors.dim)
+                    .foregroundStyle(colors.secondary)
                     .frame(width: 31, height: 29)
                     .background(colors.control, in: RoundedRectangle(cornerRadius: 7))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DockPressStyle())
             .frame(height: PaletteTextEditor.searchMinimumHeight)
             .help("管理提示词")
             .accessibilityLabel("管理提示词")
-            closeButton.frame(height: PaletteTextEditor.searchMinimumHeight)
         }
         .padding(.horizontal, 19)
         .padding(.vertical, 10)
     }
 
+    private var clearButton: some View {
+        let available = !optimizer.draft.isEmpty
+        return Button {
+            model.setDraft("")
+            model.focusSearch?()
+        } label: {
+            Image(systemName: "xmark.circle.fill").font(.system(size: 14))
+                .foregroundStyle(colors.secondary)
+                .frame(width: 24, height: 28)
+        }
+        .buttonStyle(DockPressStyle())
+        .frame(height: PaletteTextEditor.searchMinimumHeight)
+        .opacity(available ? 1 : 0)
+        .disabled(!available)
+        .accessibilityHidden(!available)
+        .accessibilityLabel("清空输入")
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: available)
+    }
+
     private var ocrButton: some View {
         Button(action: model.runOCR) {
             HStack(spacing: 4) {
-                if model.isRecognizing { ProgressView().controlSize(.small) }
+                DockActivityGlyph(isBusy: model.isRecognizing)
                 Text("OCR").font(.system(size: 12, weight: .semibold))
             }
-            .padding(.horizontal, 9)
-            .frame(height: 29)
-            .foregroundStyle(model.canRecognize ? colors.accent : colors.dim)
+            .frame(width: 56, height: 29)
+            .foregroundStyle(model.canRecognize ? colors.accent : colors.secondary)
             .background(model.canRecognize ? colors.selection : colors.control, in: RoundedRectangle(cornerRadius: 7))
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: model.canRecognize)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DockPressStyle())
         .disabled(!model.canRecognize)
         .accessibilityLabel("OCR")
         .help(model.screenshot == nil ? "将截图粘贴到输入框" : "发送截图到 DeepSeek 识别")
@@ -470,29 +539,36 @@ private struct PaletteView: View {
     private var screenshotStatus: some View {
         if model.screenshot != nil {
             HStack(spacing: 7) {
-                if let preview = model.screenshotPreview {
-                    Image(nsImage: preview)
-                        .resizable().scaledToFit()
-                        .frame(width: 25, height: 21)
-                        .accessibilityHidden(true)
-                } else {
-                    Image(systemName: "photo").accessibilityHidden(true)
+                if !model.showsOCR {
+                    if let preview = model.screenshotPreview {
+                        Image(nsImage: preview)
+                            .resizable().scaledToFit()
+                            .frame(width: 25, height: 21)
+                            .accessibilityHidden(true)
+                    } else {
+                        Image(systemName: "photo").accessibilityHidden(true)
+                    }
+                    Text("截图已粘贴").font(.system(size: 11, weight: .medium))
                 }
-                Text(model.isRecognizing ? "正在识别截图…" : "截图已粘贴")
-                    .font(.system(size: 11, weight: .medium))
                 Button(action: model.removeScreenshot) {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+                    HStack(spacing: 5) {
+                        Image(systemName: "xmark.circle.fill")
+                        if model.showsOCR { Text("移除截图") }
+                    }
+                    .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("移除截图")
                 .help("移除截图")
                 Spacer()
             }
-            .foregroundStyle(colors.dim)
+            .frame(minHeight: 21)
+            .foregroundStyle(colors.secondary)
             .padding(.horizontal, 19)
             .padding(.bottom, 7)
+            .transition(DockMotion.reveal(reduceMotion: reduceMotion))
         }
-        if let error = model.screenshotError {
+        if let error = model.screenshotAttachmentError {
             Text(error)
                 .font(.system(size: 12))
                 .foregroundStyle(colors.warning)
@@ -501,16 +577,8 @@ private struct PaletteView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 19)
                 .padding(.bottom, 7)
+                .transition(DockMotion.reveal(reduceMotion: reduceMotion))
         }
-    }
-
-    private var closeButton: some View {
-        Button { model.cancel?() } label: {
-            KeyCap(label: "esc", colors: colors).frame(height: 29)
-        }
-        .buttonStyle(.plain)
-        .help("关闭面板")
-        .accessibilityLabel("关闭面板")
     }
 
     private var results: some View {
@@ -521,9 +589,11 @@ private struct PaletteView: View {
                 Spacer()
                 Text("\(model.matches.count) 条")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .contentTransition(.opacity)
+                    .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: model.matches.count)
                     .accessibilityLabel("\(model.matches.count) 条提示词")
             }
-            .foregroundStyle(colors.dim)
+            .foregroundStyle(colors.secondary)
             .padding(.horizontal, 10)
 
             if model.matches.isEmpty {
@@ -538,7 +608,7 @@ private struct PaletteView: View {
                     } else {
                         Text("试试标题、分类或内容里的其他关键词。")
                             .font(.system(size: 12))
-                            .foregroundStyle(colors.dim)
+                            .foregroundStyle(colors.secondary)
                     }
                     Spacer()
                 }
@@ -573,32 +643,37 @@ private struct PaletteView: View {
             HStack(spacing: 10) {
                 Image(systemName: prompt.symbol)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(selected ? colors.accent : colors.dim)
+                    .foregroundStyle(selected ? colors.accent : colors.secondary)
                     .frame(width: 33, height: 33)
                     .background(selected ? colors.iconSelected : colors.control, in: RoundedRectangle(cornerRadius: 8))
+                    .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: selected)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(prompt.title).font(.system(size: 13, weight: selected ? .semibold : .medium))
                         .lineLimit(1)
                     if !prompt.category.isEmpty {
-                        Text(prompt.category).font(.system(size: 11)).foregroundStyle(colors.dim)
+                        Text(prompt.category).font(.system(size: 11)).foregroundStyle(colors.secondary)
                             .lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)
-                if selected {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(colors.accent)
-                        .accessibilityHidden(true)
-                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(colors.accent)
+                    .opacity(selected ? 1 : 0)
+                    .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: selected)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 9)
             .frame(height: 51)
             .contentShape(Rectangle())
-            .background(selected ? colors.selection : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+            .background {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(selected ? colors.selection : Color.clear)
+                    .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: selected)
+            }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DockPressStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
             Button("编辑提示词") { model.navigate?(.prompt(prompt.id)) }
@@ -611,6 +686,10 @@ private struct PaletteView: View {
                 savedPromptPreview(prompt)
             } else if optimizer.hasResult {
                 optimizedPreview
+            } else if optimizer.isOptimizing {
+                Label("正在优化提示词…", systemImage: "sparkles")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(colors.secondary)
             } else {
                 Color.clear
             }
@@ -625,7 +704,7 @@ private struct PaletteView: View {
             HStack(spacing: 9) {
                 Text("提示词预览")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(colors.dim)
+                    .foregroundStyle(colors.secondary)
                 Spacer()
                 if optimizer.hasResult {
                     Button("选用结果") {
@@ -638,21 +717,30 @@ private struct PaletteView: View {
                 }
             }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(verbatim: prompt.title)
-                        .font(.system(size: 19, weight: .semibold))
-                        .accessibilityAddTraits(.isHeader)
-                    Text(verbatim: prompt.body)
-                        .font(.system(size: 14))
-                        .lineSpacing(4)
-                        .foregroundStyle(colors.body)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(verbatim: prompt.title)
+                            .font(.system(size: 19, weight: .semibold))
+                            .contentTransition(.opacity)
+                            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: prompt.id)
+                            .accessibilityAddTraits(.isHeader)
+                            .id(PreviewAnchor.title)
+                        Text(verbatim: prompt.body)
+                            .font(.system(size: 14))
+                            .lineSpacing(4)
+                            .foregroundStyle(colors.body)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .onChange(of: prompt.id) { _ in
+                    proxy.scrollTo(PreviewAnchor.title, anchor: .top)
+                }
             }
-            .id(prompt.id)
         }
     }
+
+    private enum PreviewAnchor: Hashable { case title }
 
     private var optimizedPreview: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -667,7 +755,7 @@ private struct PaletteView: View {
                     .disabled(!canSaveResult)
             }
             .font(.system(size: 11))
-            .foregroundStyle(colors.dim)
+            .foregroundStyle(colors.secondary)
             PaletteTextEditor(
                 text: $optimizer.result,
                 label: "优化结果正文",
@@ -685,18 +773,17 @@ private struct PaletteView: View {
     }
 
     private var insertTitle: String {
-        if model.hasPermission, let target = model.targetName { return "填入 \(target)" }
-        return "复制"
+        model.insertionTargetIcon == nil ? "复制" : "插入"
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            KeyCap(label: "↑", colors: colors)
-            KeyCap(label: "↓", colors: colors)
-            Text("切换").foregroundStyle(colors.dim)
-            KeyCap(label: "⇧↩", colors: colors).padding(.leading, 5)
-            Text("换行").foregroundStyle(colors.dim)
-            Spacer(minLength: 12)
+        let buttonShape = RoundedRectangle(cornerRadius: 8)
+        let canRunOptimization = model.canOptimize || optimizer.isOptimizing
+        return HStack(spacing: 8) {
+            footerKeyHints
+                .opacity(model.showsOCR ? 0 : 1)
+                .accessibilityHidden(model.showsOCR)
+            Spacer(minLength: 4)
             Button {
                 if optimizer.isOptimizing {
                     optimizer.cancel()
@@ -705,46 +792,41 @@ private struct PaletteView: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    if optimizer.isOptimizing {
-                        ProgressView().controlSize(.small).accessibilityHidden(true)
-                    } else {
-                        Image(systemName: "sparkles").accessibilityHidden(true)
-                    }
+                    DockActivityGlyph(isBusy: optimizer.isOptimizing, idleSymbol: "sparkles")
                     Text(optimizer.isOptimizing ? "取消优化" : "优化提示词")
-                        .fontWeight(.semibold)
+                        .contentTransition(.opacity)
                 }
-                .font(.system(size: 12))
-                .foregroundStyle(colors.accent)
-                .padding(.horizontal, 11)
-                .frame(height: 29)
-                .background(colors.selection, in: RoundedRectangle(cornerRadius: 7))
-                .opacity(model.canOptimize ? 1 : 0.5)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(canRunOptimization ? colors.ink : colors.secondary)
+                .frame(width: 106, height: 30)
+                .background(colors.control, in: buttonShape)
+                .overlay {
+                    buttonShape.strokeBorder(canRunOptimization ? colors.outline : colors.line, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: optimizer.isOptimizing)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: canRunOptimization)
             }
-            .buttonStyle(.plain)
-            .disabled(!model.canOptimize)
+            .buttonStyle(DockPressStyle())
+            .disabled(!canRunOptimization)
             .accessibilityLabel(optimizer.isOptimizing ? "取消优化" : "优化提示词")
             .help("⌘↩ 优化")
 
             Button { model.confirmSelection() } label: {
-                HStack(spacing: 5) {
-                    if model.hasPermission, let icon = model.targetIcon {
+                HStack(spacing: 6) {
+                    if let icon = model.insertionTargetIcon {
                         Image(nsImage: icon).resizable().frame(width: 13, height: 13)
                             .accessibilityHidden(true)
                     }
                     Text(insertTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.9)
-                    Image(systemName: "return").font(.system(size: 10, weight: .medium))
-                        .accessibilityHidden(true)
                 }
-                .foregroundStyle(colors.actionText)
-                .padding(.horizontal, 8)
-                .frame(width: 120, height: 29)
-                .background(colors.accent, in: RoundedRectangle(cornerRadius: 7))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white)
+                .frame(width: 84, height: 30)
+                .background(colors.action, in: buttonShape)
                 .opacity(model.insertionText == nil ? 0.4 : 1)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DockPressStyle())
             .disabled(model.insertionText == nil)
             .accessibilityLabel(insertTitle)
             .help(insertTitle)
@@ -754,44 +836,39 @@ private struct PaletteView: View {
         .frame(height: 49)
     }
 
+    private var footerKeyHints: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                KeyCap(label: "↑", colors: colors)
+                KeyCap(label: "↓", colors: colors)
+                Text("切换").foregroundStyle(colors.secondary)
+                KeyCap(label: "⇧↩", colors: colors).padding(.leading, 5)
+                Text("换行").foregroundStyle(colors.secondary)
+            }
+            .fixedSize()
+
+            HStack(spacing: 4) {
+                KeyCap(label: "↑↓", colors: colors)
+                KeyCap(label: "⇧↩", colors: colors)
+            }
+            .help("方向键切换 · Shift + Return 换行")
+            .accessibilityLabel("方向键切换，Shift + Return 换行")
+        }
+    }
+
 }
 
 private struct KeyCap: View {
     let label: String
-    let colors: PaletteColors
+    let colors: DockColors
 
     var body: some View {
         Text(label)
             .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .foregroundStyle(colors.dim)
+            .foregroundStyle(colors.secondary)
             .padding(.horizontal, 5)
             .frame(minWidth: 20, minHeight: 20)
             .background(colors.control, in: RoundedRectangle(cornerRadius: 5))
             .overlay { RoundedRectangle(cornerRadius: 5).strokeBorder(colors.line, lineWidth: 1) }
-    }
-}
-
-private struct PaletteColors {
-    let dark: Bool
-
-    var surface: Color { color(0xFAFAF6, 0x202522) }
-    var preview: Color { color(0xF2F4EC, 0x1B201D) }
-    var ink: Color { color(0x202723, 0xEFF4ED) }
-    var body: Color { color(0x434F47, 0xC9D3CB) }
-    var dim: Color { color(0x5F6E64, 0xA2B1A5) }
-    var accent: Color { color(0x23634C, 0x9ADBBA) }
-    var warning: Color { color(0x9E4B22, 0xFFBC89) }
-    var actionText: Color { color(0xFFFFFF, 0x142C21) }
-    var line: Color { color(0xE1E6DD, 0x343F37) }
-    var outline: Color { color(0xD4DDD1, 0x485249) }
-    var control: Color { color(0xECEFE7, 0x303A33) }
-    var selection: Color { color(0xE1EDE2, 0x2B4337) }
-    var iconSelected: Color { color(0xD4E7D8, 0x395744) }
-
-    private func color(_ light: UInt32, _ darkValue: UInt32) -> Color {
-        let hex = dark ? darkValue : light
-        return Color(red: Double((hex >> 16) & 255) / 255,
-                     green: Double((hex >> 8) & 255) / 255,
-                     blue: Double(hex & 255) / 255)
     }
 }

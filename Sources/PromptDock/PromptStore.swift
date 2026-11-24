@@ -11,7 +11,9 @@ struct Prompt: Identifiable, Codable, Equatable {
 
 @MainActor
 final class PromptStore: ObservableObject {
-    @Published private(set) var prompts: [Prompt] = []
+    @Published private(set) var prompts: [Prompt] = [] {
+        didSet { if prompts != oldValue { rebuildSearchIndex(in: Locale.current) } }
+    }
     @Published private(set) var shortcut = HotKey.defaultValue
     @Published private(set) var compactShortcut = HotKey.compactDefaultValue
     @Published private(set) var storageError: String?
@@ -30,6 +32,24 @@ final class PromptStore: ObservableObject {
 
     private let fileURL: URL
     private var hasUnreadableLibrary = false
+    private var searchLocale = Locale.current
+    private var searchIndex: [SearchEntry] = []
+    private var lastSearch: (terms: [String], results: [Prompt])?
+
+    private struct SearchEntry {
+        let prompt: Prompt
+        let fields: [SearchField]
+    }
+
+    private struct SearchField {
+        let bytes: Data
+        let compoundText: String?
+
+        init(_ normalized: String) {
+            bytes = Data(normalized.utf8)
+            compoundText = normalized.unicodeScalars.count == normalized.count ? nil : normalized
+        }
+    }
 
     init(fileURL: URL? = nil) {
         self.fileURL = fileURL ?? URL.applicationSupportDirectory
@@ -48,6 +68,7 @@ final class PromptStore: ObservableObject {
             hasUnreadableLibrary = true
             storageError = "无法读取提示词资料库。原文件已保留。"
         }
+        rebuildSearchIndex(in: Locale.current)
     }
 
     @discardableResult
@@ -97,17 +118,41 @@ final class PromptStore: ObservableObject {
 
     func matching(_ query: String) -> [Prompt] {
         let locale = Locale.current
-        func searchable(_ value: String) -> String {
-            value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: locale)
-        }
-
-        let terms = searchable(query).split(whereSeparator: \.isWhitespace)
+        let terms = Self.searchable(query, in: locale).split(whereSeparator: \.isWhitespace).map(String.init)
         guard !terms.isEmpty else { return prompts }
-
-        return prompts.filter { prompt in
-            let fields = [prompt.title, prompt.category, prompt.body].map(searchable)
-            return terms.allSatisfy { term in fields.contains { $0.contains(term) } }
+        if searchLocale != locale { rebuildSearchIndex(in: locale) }
+        if let lastSearch, lastSearch.terms == terms { return lastSearch.results }
+        let needles = terms.map { (text: $0, bytes: Data($0.utf8)) }
+        let results = searchIndex.compactMap { entry in
+            let matches = needles.allSatisfy { term in
+                entry.fields.contains { field in
+                    // The byte match is the fast rejection path. Check graphemes for compound characters.
+                    field.bytes.range(of: term.bytes) != nil && (field.compoundText?.contains(term.text) ?? true)
+                }
+            }
+            return matches ? entry.prompt : nil
         }
+        lastSearch = (terms, results)
+        return results
+    }
+
+    private static func searchable(_ value: String, in locale: Locale) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: locale)
+            .precomposedStringWithCanonicalMapping
+    }
+
+    private func rebuildSearchIndex(in locale: Locale) {
+        // Reordering or editing one prompt can reuse the rest of the normalized search text.
+        let previous = searchLocale == locale
+            ? Dictionary(searchIndex.map { ($0.prompt.id, $0) }, uniquingKeysWith: { first, _ in first })
+            : [:]
+        searchIndex = prompts.map { prompt in
+            if let entry = previous[prompt.id], entry.prompt == prompt { return entry }
+            let fields = [prompt.title, prompt.category, prompt.body].map { SearchField(Self.searchable($0, in: locale)) }
+            return SearchEntry(prompt: prompt, fields: fields)
+        }
+        searchLocale = locale
+        lastSearch = nil
     }
 
     private func save(_ library: Library) -> Bool {
