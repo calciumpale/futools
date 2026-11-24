@@ -50,9 +50,13 @@ done
 /usr/bin/codesign --force --sign - --timestamp=none "$bundle"
 
 verify_bundle() {
-    local app=$1 target arch build minimum platform
+    local app=$1 target slices arch build minimum platform
     target="$app/Contents/MacOS/$executable"
-    /usr/bin/lipo "$target" -verify_arch arm64 x86_64
+    slices=$(/usr/bin/lipo -archs "$target")
+    case "$slices" in
+        "arm64 x86_64"|"x86_64 arm64") ;;
+        *) fail "The release executable must contain arm64 and x86_64. Found: $slices" ;;
+    esac
     for arch in arm64 x86_64; do
         build=$(/usr/bin/vtool -arch "$arch" -show-build "$target")
         minimum=$(printf '%s\n' "$build" | /usr/bin/awk '$1 == "minos" { print $2 }')
@@ -65,9 +69,9 @@ verify_bundle() {
 }
 
 verify_bundle "$bundle"
-# Fixed timestamps keep ZIP metadata independent of the time the package was built.
+# Normalize timestamps and omit incidental extended attributes from the archive.
 /usr/bin/find "$bundle" -exec /usr/bin/touch -t 202001010000 {} +
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$bundle" "$archive"
+/usr/bin/ditto -c -k --norsrc --keepParent "$bundle" "$archive"
 
 expected_entries=$(printf '%s\n' \
     'futools.app/Contents/Info.plist' \
