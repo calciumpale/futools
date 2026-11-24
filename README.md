@@ -7,7 +7,7 @@ Prompt Dock 是一个 macOS 菜单栏应用。它把常用提示词填入打开�
 1. 双击打开 `dist/Prompt Dock.app`。首次启动会打开设置。也可以从菜单栏的对话气泡图标进入设置。
 2. 在设置里点击开启辅助功能权限，然后在 macOS 的「系统设置 → 隐私与安全性 → 辅助功能」中启用 Prompt Dock。面板也可以在未授权时使用，按 Enter 会把提示词复制到剪贴板。
 3. 将光标放在 ChatGPT、Codex 或其他应用的输入框里，按 **⌃⌥Space** 唤出面板。在左上方输入关键词即可搜索提示词，也可以直接在这个输入框里写一段待优化的草稿。
-4. 用 **↑ / ↓** 浏览搜索结果，按 **Enter** 把选中的提示词填入原应用。完成后可以在原应用中发送。按 **Esc** 或再按一次全局快捷键可关闭面板。
+4. 点击提示词或用 **↑ / ↓** 切换，右侧会显示所选提示词的完整正文。按 **Enter** 把选中的提示词填入原应用。按 **Esc** 或再按一次全局快捷键可关闭面板。
 
 在菜单栏的「管理提示词」中添加、修改或删除提示词。拖动列表每行右侧的把手即可排序，命令面板会同步这个顺序。搜索覆盖标题、分类和正文。
 
@@ -19,12 +19,18 @@ Prompt Dock 是一个 macOS 菜单栏应用。它把常用提示词填入打开�
 
 如果系统的辅助功能开关已打开，应用内仍显示「待授权」，可以从辅助功能列表移除旧的 Prompt Dock，再用列表底部的「+」添加当前的 `dist/Prompt Dock.app`。之后退出并重新打开应用。
 
+## 按住说话
+
+启用辅助功能后，打开命令面板就可以直接按住触控板说话，指针可以留在原来的位置。松开后，转写文字会填到输入框的光标处。也可以按住面板上的麦克风。首次使用时，按 macOS 的提示允许麦克风和语音识别权限，再次按住即可开始录音。
+
+转写使用 macOS 自带的语音识别。支持本机识别时，音频在设备上处理。需要联网识别时，音频会发送给 Apple 处理。 [Apple 语音识别文档](https://developer.apple.com/documentation/speech/sfspeechrecognitionrequest/requiresondevicerecognition)
+
 ## 提示词优化
 
 1. 在 DeepSeek 开放平台创建 API Key。 [DeepSeek API Keys](https://platform.deepseek.com/api_keys)
 2. 打开 Prompt Dock 的「设置」，在「DeepSeek API」里填写自己的 API Key，再点「保存密钥」。密钥保存在 macOS 钥匙串里。
 3. 在同一个输入框搜索提示词，或写入、粘贴草稿。按 **⇧↩** 换行，点底部的「优化提示词」或按 **⌘↩** 提交优化。
-4. 面板右侧初始留空。结果出现后可继续编辑、填入原输入框，或存为新提示词。
+4. 优化结果出现在面板右侧。结果出现后可继续编辑、填入原输入框，或存为新提示词。如果切换到已保存的提示词，点击右侧的「选用结果」可返回优化结果。
 
 已预设 DeepSeek V4.1 Flash，模型 ID 为 `deepseek-flash`。点击「优化提示词」时，草稿会发送到 DeepSeek 官方 API，按 DeepSeek 的 API 用量计费。 [DeepSeek API 文档](https://api-docs.deepseek.com/api/create-chat-completion/) · [用量与价格](https://api-docs.deepseek.com/quick_start/pricing/)
 

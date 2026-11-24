@@ -51,7 +51,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        optimizer.cancel()
+        palette.dismiss()
     }
 
     private func makeMainMenu() {

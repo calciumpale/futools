@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 final class PaletteController: NSObject, NSWindowDelegate {
     private let model: PaletteModel
+    private let voicePress = PaletteVoicePress()
     private var window: PaletteWindow?
     private var target: NSRunningApplication?
 
@@ -21,6 +22,18 @@ final class PaletteController: NSObject, NSWindowDelegate {
         model.handleSearchCommand = { [weak self] command in
             self?.handleSearchCommand(command) ?? false
         }
+        model.beginVoiceInput = { [weak self] in self?.beginVoiceInput() }
+        voicePress.canBegin = { [weak self] in
+            guard let self else { return false }
+            return self.isVisible && self.window?.isKeyWindow == true &&
+                self.model.voice.phase == .idle && !self.model.optimizer.isOptimizing
+        }
+        voicePress.onBegin = { [weak self] in self?.beginVoiceInput() }
+        voicePress.onEnd = { [weak self] in self?.model.voice.finish() }
+        voicePress.onCancel = { [weak self] in
+            guard let voice = self?.model.voice, voice.phase != .requestingPermission else { return }
+            voice.cancel()
+        }
     }
 
     func show(target: NSRunningApplication?) {
@@ -37,10 +50,15 @@ final class PaletteController: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.focusSearch()
         window.invalidateShadow()
+        model.canPressAnywhere = voicePress.start()
     }
 
-    func dismiss() {
+    func dismiss(keepVoiceAuthorization: Bool = false) {
+        voicePress.stop()
         window?.pendingEnter = nil
+        if !keepVoiceAuthorization || model.voice.phase != .requestingPermission {
+            model.voice.cancel()
+        }
         window?.orderOut(nil)
         model.optimizer.cancel()
         target = nil
@@ -50,8 +68,33 @@ final class PaletteController: NSObject, NSWindowDelegate {
         // Allow the original key-window transition to finish before ordering the panel out.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isVisible, self.window?.isKeyWindow == false else { return }
-            self.dismiss()
+            self.dismiss(keepVoiceAuthorization: true)
         }
+    }
+
+    private func beginVoiceInput() {
+        guard isVisible, !model.optimizer.isOptimizing else { return }
+        window?.pendingEnter = nil
+        model.voice.begin { [weak self] text in self?.acceptTranscript(text) }
+    }
+
+    private func acceptTranscript(_ text: String) {
+        guard isVisible, let window else { return }
+        window.focusSearch()
+        guard let editor = window.searchField else {
+            model.setDraft(model.optimizer.draft + text)
+            return
+        }
+        if editor.hasMarkedText() {
+            editor.unmarkText()
+            model.setDraft(editor.string)
+        }
+        guard editor.string == model.optimizer.draft else {
+            model.setDraft(model.optimizer.draft + text)
+            return
+        }
+        editor.insertText(text, replacementRange: editor.selectedRange())
+        model.setDraft(editor.string)
     }
 
     private func insert(_ text: String) {
@@ -82,7 +125,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
         window.onCancel = { [weak self] in self?.dismiss() }
         window.onConfirm = { [weak self] in self?.model.confirmSelection() }
         window.contentView = NSHostingView(rootView: PaletteView(
-            model: model, store: model.store, optimizer: model.optimizer
+            model: model, store: model.store, optimizer: model.optimizer, voice: model.voice
         ))
         return window
     }
@@ -99,6 +142,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
             return true
         case #selector(NSResponder.insertNewline(_:)):
             if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+            guard model.voice.phase == .idle else { return true }
             // Keep focus until key-up so a held Return cannot repeat into the target app.
             if let event = NSApp.currentEvent, event.type == .keyDown,
                event.keyCode == 36 || event.keyCode == 76 {
@@ -148,16 +192,19 @@ final class PaletteWindow: NSPanel {
 private final class PaletteModel: ObservableObject {
     let store: PromptStore
     let optimizer: PromptOptimizer
+    let voice = VoiceInputController()
     @Published private(set) var selectedID: UUID?
     @Published private(set) var targetName: String?
     @Published private(set) var targetIcon: NSImage?
     @Published private(set) var hasPermission = false
+    @Published var canPressAnywhere = false
 
     var performInsert: ((String) -> Void)?
     var navigate: ((LibraryDestination) -> Void)?
     var cancel: (() -> Void)?
     var focusSearch: (() -> Void)?
     var handleSearchCommand: ((Selector) -> Bool)?
+    var beginVoiceInput: (() -> Void)?
 
     init(store: PromptStore, optimizer: PromptOptimizer) {
         self.store = store
@@ -170,10 +217,10 @@ private final class PaletteModel: ObservableObject {
         !optimizer.draft.contains(where: \.isNewline) && !matches.isEmpty
     }
     var canOptimize: Bool {
-        !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        voice.phase == .idle && !optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     var insertionText: String? {
-        guard !optimizer.isOptimizing else { return nil }
+        guard !optimizer.isOptimizing, voice.phase == .idle else { return nil }
         if let selectedPrompt { return selectedPrompt.body }
         let text = optimizer.hasResult ? optimizer.result : optimizer.draft
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
@@ -184,6 +231,7 @@ private final class PaletteModel: ObservableObject {
         targetIcon = target?.icon
         hasPermission = PasteService.hasPermission
         optimizer.reset()
+        if voice.phase != .requestingPermission { voice.cancel() }
         selectedID = matches.first?.id
     }
 
@@ -222,6 +270,7 @@ private struct PaletteView: View {
     @ObservedObject var model: PaletteModel
     @ObservedObject var store: PromptStore
     @ObservedObject var optimizer: PromptOptimizer
+    @ObservedObject var voice: VoiceInputController
     @Environment(\.colorScheme) private var scheme
 
     private var colors: PaletteColors { PaletteColors(dark: scheme == .dark) }
@@ -229,6 +278,7 @@ private struct PaletteView: View {
     var body: some View {
         VStack(spacing: 0) {
             searchBar
+            voiceStatus
             separator
             HStack(spacing: 0) {
                 results.frame(width: 308)
@@ -262,13 +312,40 @@ private struct PaletteView: View {
 
     private var separator: some View { Rectangle().fill(colors.line).frame(height: 1) }
 
+    private var voiceStatusText: String? {
+        switch voice.phase {
+        case .idle: return voice.message
+        case .requestingPermission: return "等待系统授权…"
+        case .recording: return voice.message ?? "正在听，松开后转成文字"
+        case .finishing: return "正在转成文字…"
+        }
+    }
+
+    @ViewBuilder
+    private var voiceStatus: some View {
+        if let text = voiceStatusText {
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(voice.phase == .recording ? colors.accent : colors.dim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 19)
+                .padding(.bottom, 7)
+        }
+    }
+
     private var searchBar: some View {
         HStack(alignment: .top, spacing: 13) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(colors.accent)
-                .frame(height: PaletteTextEditor.searchMinimumHeight)
-                .accessibilityHidden(true)
+            VoicePressButton(
+                phase: voice.phase,
+                isEnabled: !optimizer.isOptimizing,
+                canPressAnywhere: model.canPressAnywhere,
+                onBegin: { model.beginVoiceInput?() },
+                onEnd: voice.finish,
+                onCancel: {
+                    if voice.phase != .requestingPermission { voice.cancel() }
+                }
+            )
+            .frame(width: 32, height: PaletteTextEditor.searchMinimumHeight)
             PaletteTextEditor(
                 text: Binding(get: { optimizer.draft }, set: model.setDraft),
                 label: "搜索或输入提示词",
@@ -414,42 +491,77 @@ private struct PaletteView: View {
 
     private var preview: some View {
         Group {
-            if optimizer.hasResult {
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 9) {
-                        Text("优化结果")
-                            .font(.system(size: 12, weight: .semibold))
-                            .accessibilityAddTraits(.isHeader)
-                        Spacer()
-                        if model.selectedID != nil {
-                            Button("选用结果", action: model.chooseResult)
-                                .buttonStyle(.plain)
-                                .foregroundStyle(colors.accent)
-                        }
-                        Button("存为提示词") { model.navigate?(.newWithBody(optimizer.result)) }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(colors.accent)
-                            .disabled(!canSaveResult)
-                    }
-                    .font(.system(size: 11))
-                    .foregroundStyle(colors.dim)
-                    PaletteTextEditor(
-                        text: $optimizer.result,
-                        label: "优化结果正文",
-                        fontSize: 14,
-                        textColor: colors.body,
-                        accentColor: colors.accent,
-                        onFocus: model.chooseResult
-                    )
-                    .frame(maxHeight: .infinity)
-                }
-                .padding(15)
+            if let prompt = model.selectedPrompt {
+                savedPromptPreview(prompt)
+            } else if optimizer.hasResult {
+                optimizedPreview
             } else {
                 Color.clear
             }
         }
+        .padding(15)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(colors.preview)
+    }
+
+    private func savedPromptPreview(_ prompt: Prompt) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                Text("提示词预览")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(colors.dim)
+                Spacer()
+                if optimizer.hasResult {
+                    Button("选用结果") {
+                        model.chooseResult()
+                        model.focusSearch?()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(colors.accent)
+                }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(verbatim: prompt.title)
+                        .font(.system(size: 19, weight: .semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    Text(verbatim: prompt.body)
+                        .font(.system(size: 14))
+                        .lineSpacing(4)
+                        .foregroundStyle(colors.body)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .id(prompt.id)
+        }
+    }
+
+    private var optimizedPreview: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 9) {
+                Text("优化结果")
+                    .font(.system(size: 12, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button("存为提示词") { model.navigate?(.newWithBody(optimizer.result)) }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(colors.accent)
+                    .disabled(!canSaveResult)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(colors.dim)
+            PaletteTextEditor(
+                text: $optimizer.result,
+                label: "优化结果正文",
+                fontSize: 14,
+                textColor: colors.body,
+                accentColor: colors.accent,
+                onFocus: model.chooseResult
+            )
+            .frame(maxHeight: .infinity)
+        }
     }
 
     private var canSaveResult: Bool {
