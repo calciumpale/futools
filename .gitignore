@@ -1,0 +1,19 @@
+.build/
+.DS_Store
+.swiftpm/
+dist/
+
+# Local data and credentials
+.env
+.env.*
+.envrc
+.dev.vars
+.dev.vars.*
+library.json
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.keychain
+*.keychain-db
