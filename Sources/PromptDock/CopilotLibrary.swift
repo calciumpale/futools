@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import Foundation
@@ -44,13 +45,55 @@ struct CopilotMaterial: Identifiable, Codable, Equatable, Sendable {
     var kind: Kind
     var title: String
     var body: String
+    var isPinned: Bool
+    var tags: [String]
     fileprivate var attachment: Attachment?
 
-    init(id: UUID = UUID(), kind: Kind, title: String, body: String) {
+    init(
+        id: UUID = UUID(),
+        kind: Kind,
+        title: String,
+        body: String,
+        isPinned: Bool = false,
+        tags: [String] = []
+    ) {
         self.id = id
         self.kind = kind
         self.title = title
         self.body = body
+        self.isPinned = isPinned
+        self.tags = tags
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, title, body, isPinned, tags, attachment
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        title = try container.decode(String.self, forKey: .title)
+        body = try container.decode(String.self, forKey: .body)
+        isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        attachment = try container.decodeIfPresent(Attachment.self, forKey: .attachment)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(title, forKey: .title)
+        try container.encode(body, forKey: .body)
+        if isPinned { try container.encode(isPinned, forKey: .isPinned) }
+        if !tags.isEmpty { try container.encode(tags, forKey: .tags) }
+        try container.encodeIfPresent(attachment, forKey: .attachment)
+    }
+
+    var linkHost: String? {
+        guard kind == .link, let url = URL(string: body), let host = url.host, !host.isEmpty else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 }
 
@@ -115,29 +158,62 @@ final class CopilotLibraryStore: ObservableObject {
         rebuildSearchIndex()
     }
 
+    func count(of kind: CopilotMaterial.Kind) -> Int {
+        materials.reduce(0) { $0 + ($1.kind == kind ? 1 : 0) }
+    }
+
     /// Matches a title inside a natural-language query, or all query words across a material's fields.
-    /// Title matches come first. Equal matches keep the library order.
-    /// A blank query returns recent materials. Results never exceed `limit`.
-    func search(_ query: String, limit: Int = 20) -> [CopilotMaterial] {
+    /// Pinned items and title matches come first. Equal matches keep the library order.
+    /// A blank query returns pinned materials followed by recent materials. Results never exceed `limit`.
+    func search(_ query: String, kind: CopilotMaterial.Kind? = nil, limit: Int = 20) -> [CopilotMaterial] {
         guard limit > 0 else { return [] }
         if searchLocale != Locale.current { rebuildSearchIndex() }
         let normalized = Self.searchable(query, locale: searchLocale)
         let terms = normalized.split(whereSeparator: \.isWhitespace).map { (text: String($0), bytes: Data($0.utf8)) }
-        guard !terms.isEmpty else { return Array(materials.prefix(limit)) }
+
+        if terms.isEmpty {
+            var pinned: [CopilotMaterial] = []
+            var regular: [CopilotMaterial] = []
+            for material in materials {
+                if let kind, material.kind != kind { continue }
+                if material.isPinned {
+                    pinned.append(material)
+                    if pinned.count == limit { return pinned }
+                } else if regular.count < limit {
+                    regular.append(material)
+                }
+            }
+            return Array((pinned + regular).prefix(limit))
+        }
+
+        var pinnedTitle: [CopilotMaterial] = []
         var titleMatches: [CopilotMaterial] = []
+        var pinnedOther: [CopilotMaterial] = []
         var otherMatches: [CopilotMaterial] = []
+
         for (material, entry) in zip(materials, searchIndex) {
-            if (entry.title.count >= 2 && normalized.contains(entry.title)) || terms.allSatisfy({ entry.title.contains($0.text) }) {
-                titleMatches.append(material)
-                if titleMatches.count == limit { return titleMatches }
-            } else if otherMatches.count < limit {
+            if let kind, material.kind != kind { continue }
+            let matchesTitle = (entry.title.count >= 2 && normalized.contains(entry.title))
+                || terms.allSatisfy { entry.title.contains($0.text) }
+            if matchesTitle {
+                if material.isPinned {
+                    pinnedTitle.append(material)
+                    if pinnedTitle.count == limit { return pinnedTitle }
+                } else if titleMatches.count < limit {
+                    titleMatches.append(material)
+                }
+            } else if pinnedOther.count + otherMatches.count < limit {
                 let detail = entry.detail ?? SearchField(Self.searchable(Self.searchDetails(material), locale: searchLocale))
                 if terms.allSatisfy({ entry.title.contains($0.text) || detail.contains($0.text, bytes: $0.bytes) }) {
-                    otherMatches.append(material)
+                    if material.isPinned {
+                        pinnedOther.append(material)
+                    } else if otherMatches.count < limit {
+                        otherMatches.append(material)
+                    }
                 }
             }
         }
-        return Array((titleMatches + otherMatches).prefix(limit))
+        return Array((pinnedTitle + titleMatches + pinnedOther + otherMatches).prefix(limit))
     }
 
     private func rebuildSearchIndex() {
@@ -156,7 +232,8 @@ final class CopilotLibraryStore: ObservableObject {
     }
 
     private static func searchDetails(_ material: CopilotMaterial) -> String {
-        material.body + " " + material.kind.title + " " + material.kind.rawValue
+        let tagText = material.tags.joined(separator: " ")
+        return material.body + " " + tagText + " " + material.kind.title + " " + material.kind.rawValue
     }
 
     func attachmentURL(for material: CopilotMaterial) -> URL? {
@@ -165,10 +242,18 @@ final class CopilotLibraryStore: ObservableObject {
         return storedFile(for: attachment)
     }
 
+    func togglePin(_ id: UUID) throws {
+        guard let index = materials.firstIndex(where: { $0.id == id }) else { return }
+        var next = materials
+        next[index].isPinned.toggle()
+        try persist(next)
+    }
+
     func save(_ material: CopilotMaterial, importing source: URL? = nil) async throws {
         guard catalogReadable else { throw Failure.storage }
         var updated = material
         updated.title = material.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.tags = Self.normalizedTags(material.tags)
         guard !updated.title.isEmpty else { throw Failure.emptyTitle }
         let original = materials.first { $0.id == material.id }
         var imported: CopilotMaterial.Attachment?
@@ -219,6 +304,30 @@ final class CopilotLibraryStore: ObservableObject {
         guard let material = materials.first(where: { $0.id == id }) else { return }
         try persist(materials.filter { $0.id != id })
         if let attachment = material.attachment { discard(attachment) }
+    }
+
+    static func normalizedTags(_ raw: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for entry in raw {
+            let trimmed = String(entry.trimmingCharacters(in: .whitespacesAndNewlines).prefix(20))
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                result.append(trimmed)
+                if result.count == 6 { break }
+            }
+        }
+        return result
+    }
+
+    static func parseTags(_ input: String) -> [String] {
+        let separators = CharacterSet(charactersIn: ",，、;；#")
+        return normalizedTags(input.components(separatedBy: separators))
+    }
+
+    static func isValidWebLink(_ input: String) -> Bool {
+        validLink(input.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func persist(_ items: [CopilotMaterial]) throws {
@@ -371,5 +480,54 @@ final class CopilotLibraryStore: ObservableObject {
             case .storage: return "无法保存素材库，请检查磁盘空间和目录权限。"
             }
         }
+    }
+}
+
+@MainActor
+final class CopilotThumbnailCache {
+    static let shared = CopilotThumbnailCache()
+
+    private let cache = NSCache<NSString, NSImage>()
+
+    private init() {
+        cache.countLimit = 80
+    }
+
+    func thumbnail(for url: URL, kind: CopilotMaterial.Kind, maxPixelSize: Int = 144) async -> NSImage? {
+        let key = "\(url.path)::\(kind.rawValue)::\(maxPixelSize)" as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        let cgImage: CGImage? = await Task.detached(priority: .utility) {
+            switch kind {
+            case .image:
+                return Self.imageThumbnail(at: url, maxPixelSize: maxPixelSize)
+            case .video:
+                return await Self.videoThumbnail(at: url, maxPixelSize: maxPixelSize)
+            case .text, .link:
+                return nil
+            }
+        }.value
+        guard let cgImage else { return nil }
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    nonisolated private static func imageThumbnail(at url: URL, maxPixelSize: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
+    nonisolated private static func videoThumbnail(at url: URL, maxPixelSize: Int) async -> CGImage? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+        return try? await generator.image(at: .zero).image
     }
 }

@@ -15,9 +15,9 @@ final class CompactWeChatControls: ObservableObject {
 
         var isBusy: Bool { isGenerating || self == .inserting }
 
-        fileprivate var isGenerating: Bool { self == .capturing || self == .suggesting }
+        var isGenerating: Bool { self == .capturing || self == .suggesting }
 
-        fileprivate var actionTitle: String {
+        var actionTitle: String {
             switch self {
             case .confirming: return "同意并建议"
             case .capturing, .suggesting, .choosingTarget, .choosingReply: return "取消"
@@ -25,7 +25,7 @@ final class CompactWeChatControls: ObservableObject {
             }
         }
 
-        fileprivate var choiceTitle: String? {
+        var choiceTitle: String? {
             switch self {
             case .choosingTarget: return "选一句对方说的话"
             case .choosingReply: return "选一条回复"
@@ -36,19 +36,28 @@ final class CompactWeChatControls: ObservableObject {
 
     @Published var isActive = false
     @Published var appName = "微信"
+    @Published var dockSide: CopilotDockLayout.Side = .right
     @Published var phase: Phase = .idle
     @Published var canPressAnywhere = false
     @Published var hasScreenshot = false
+    @Published var screenshotPreview: NSImage?
     @Published var hasSelectedRegion = false
     @Published var captureIsRestricted = false
     @Published var pastedTextPreview: String?
+    @Published var pastedFullText: String?
     @Published var choices: [CompactWeChatChoice] = []
+    @Published var recentSuggestions: [String] = []
     @Published var replyCount = 1
     @Published var replyTone: DeepSeekPromptAPI.WeChatTone = .natural
+    @Published var useLibraryInReply = false
+    @Published var matchedLibraryCount = 0
+    @Published var isPolishing = false
     @Published var replyTargetPreview: String?
     @Published var insertionNotice: String?
     var onSuggest: (() -> Void)?
     var onInsert: (() -> Void)?
+    var onDirectInsertText: ((String) -> Void)?
+    var onPolishDraft: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSelectRegion: (() -> Void)?
     var onPasteContext: (() -> Void)?
@@ -57,12 +66,13 @@ final class CompactWeChatControls: ObservableObject {
     var onChoose: ((Int) -> Void)?
     var onSetReplyCount: ((Int) -> Void)?
     var onSetReplyTone: ((DeepSeekPromptAPI.WeChatTone) -> Void)?
+    var onSetUseLibrary: ((Bool) -> Void)?
     var alwaysOffersPastedContext = false
 
-    fileprivate var insertionProgress: String { "正在插入\(appName)…" }
-    fileprivate var restrictedCaptureHint: String { "当前\(appName)会话限制截图，可粘贴聊天文字或截图。" }
+    var insertionProgress: String { "正在插入\(appName)…" }
+    var restrictedCaptureHint: String { "当前\(appName)会话限制截图，可粘贴聊天文字或截图。" }
 
-    fileprivate var needsPastedContext: Bool {
+    var needsPastedContext: Bool {
         guard captureIsRestricted, !hasScreenshot, pastedTextPreview == nil else { return false }
         switch phase {
         case .idle, .inserting, .failed: return true
