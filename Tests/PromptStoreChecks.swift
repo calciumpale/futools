@@ -95,21 +95,24 @@ enum PromptStoreChecks {
         let file = temporaryLibrary()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let store = PromptStore(fileURL: file)
-        try expect(store.shortcut == .defaultValue && store.compactShortcut == .compactDefaultValue,
+        try expect(store.shortcut == .defaultValue && store.compactShortcut == .compactDefaultValue && store.copilotShortcut == .copilotDefaultValue,
                    "A new store did not use independent shortcut defaults.")
 
         let compact = HotKey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey | controlKey), keyLabel: "P")
         let command = HotKey(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(cmdKey | optionKey), keyLabel: "F")
+        let copilot = HotKey(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | controlKey), keyLabel: "K")
         try expect(store.setCompactShortcut(compact), "Could not save compact shortcut.")
         try expect(store.setShortcut(command), "Could not change command shortcut independently.")
-        try expect(store.upsert(Prompt(title: "新增", body: "正文")), "Could not save a prompt with both bindings.")
+        try expect(store.setCopilotShortcut(copilot), "Could not save a third independent binding.")
+        try expect(store.upsert(Prompt(title: "新增", body: "正文")), "Could not save a prompt with the three bindings.")
         let beforeConflict = try Data(contentsOf: file)
-        try expect(!store.setCompactShortcut(command) && !store.setShortcut(compact), "Store accepted duplicate shortcuts.")
+        try expect(!store.setCompactShortcut(command) && !store.setShortcut(compact) && !store.setCopilotShortcut(command) &&
+                   !store.setShortcut(copilot), "Store accepted duplicate shortcuts.")
         try expect(try Data(contentsOf: file) == beforeConflict, "Rejecting a shortcut collision modified the library.")
 
         let reopened = PromptStore(fileURL: file)
-        try expect(reopened.shortcut == command && reopened.compactShortcut == compact,
-                   "The two persisted bindings were lost or overwritten.")
+        try expect(reopened.shortcut == command && reopened.compactShortcut == compact && reopened.copilotShortcut == copilot,
+                   "The three persisted bindings were lost or overwritten.")
     }
 
     private static func migratesLegacyShortcutsWithoutChangingTheCommandChord() throws {
@@ -123,19 +126,22 @@ enum PromptStoreChecks {
         defer { try? FileManager.default.removeItem(at: folder) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let prompt = Prompt(title: "旧提示词", body: "旧正文")
-        for command in [HotKey.defaultValue, .compactDefaultValue] {
+        for command in [HotKey.defaultValue, .compactDefaultValue, .copilotDefaultValue] {
             let original = try JSONEncoder().encode(LegacyLibrary(prompts: [prompt], shortcut: command))
             try original.write(to: file)
             let store = PromptStore(fileURL: file)
             try expect(store.shortcut == command && store.prompts == [prompt], "Migration changed the existing library.")
             try expect(store.compactShortcut != command, "Migration assigned a chord already used by the command panel.")
+            try expect(store.copilotShortcut != command && store.copilotShortcut != store.compactShortcut,
+                       "Migration reused a binding for Copilot.")
             if command != .compactDefaultValue {
                 try expect(store.compactShortcut == .compactDefaultValue, "Migration missed the normal compact default.")
             }
             try expect(try Data(contentsOf: file) == original, "Opening a legacy library rewrote its contents.")
             try expect(store.upsert(prompt), "Could not save a migrated library.")
             let reopened = PromptStore(fileURL: file)
-            try expect(reopened.compactShortcut == store.compactShortcut, "The migrated binding did not persist.")
+            try expect(reopened.compactShortcut == store.compactShortcut && reopened.copilotShortcut == store.copilotShortcut,
+                       "The migrated bindings did not persist.")
         }
     }
 

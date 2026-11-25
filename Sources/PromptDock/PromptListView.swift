@@ -54,14 +54,17 @@ struct PromptListView: NSViewRepresentable {
 
         func update(_ list: PromptListView, table: NSTableView) {
             let hasNewPrompts = self.list.prompts != list.prompts
-            let refreshCells = self.list.selectedID != list.selectedID || self.list.colors.dark != list.colors.dark ||
-                self.list.reduceMotion != list.reduceMotion
+            let oldSelection = self.list.selectedID
+            let appearanceChanged = self.list.colors.dark != list.colors.dark || self.list.reduceMotion != list.reduceMotion
             self.list = list
             if hasNewPrompts {
                 table.reloadData()
-            } else if refreshCells {
+            } else if oldSelection != list.selectedID || appearanceChanged {
                 table.enumerateAvailableRowViews { rowView, row in
-                    guard let cell = rowView.view(atColumn: 0) as? NSHostingView<PromptRow> else { return }
+                    guard list.prompts.indices.contains(row),
+                          let cell = rowView.view(atColumn: 0) as? NSHostingView<PromptRow> else { return }
+                    let id = list.prompts[row].id
+                    guard appearanceChanged || id == oldSelection || id == list.selectedID else { return }
                     cell.rootView = self.rowView(for: row)
                 }
             }

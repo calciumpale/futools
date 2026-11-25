@@ -54,7 +54,7 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
         recognition = nil
         image = nil
         state.phase = .waiting
-        panel?.orderOut(nil)
+        if let panel { DockWindowMotion.hide(panel) }
     }
 
     func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation { entered(sender, at: .panel) }
@@ -69,7 +69,7 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
         leaveTimer?.invalidate()
         leaveTimer = nil
         hover = (sender.draggingSequenceNumber, destination)
-        state.isHovering = true
+        if !state.isHovering { state.isHovering = true }
         showPanel()
         return copyOperation(for: sender)
     }
@@ -86,8 +86,11 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
               sender == nil || sender?.draggingSequenceNumber == hover.sequence else { return }
         leaveTimer?.invalidate()
         // Crossing the screen gap dispatches icon exit before panel enter.
-        let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.finishHover() }
+        let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self] fired in
+            MainActor.assumeIsolated {
+                guard let self, self.leaveTimer === fired else { return }
+                self.finishHover()
+            }
         }
         leaveTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -198,13 +201,13 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
         leaveTimer?.invalidate()
         leaveTimer = nil
         hover = nil
-        state.isHovering = false
+        if state.isHovering { state.isHovering = false }
     }
 
     private func finishHover() {
         stopHover()
         if case .waiting = state.phase {
-            panel?.orderOut(nil)
+            if let panel { DockWindowMotion.hide(panel) }
         } else {
             showPanel()
         }
@@ -255,11 +258,17 @@ final class MenuBarOCRDrop: NSObject, NSWindowDelegate, NSDraggingDestination {
         let left = min(max(anchor.midX - size.width / 2, available.minX), available.maxX - size.width)
         let top = min(anchor.minY - 3, available.maxY)
         let frame = NSRect(x: left, y: top - size.height, width: size.width, height: size.height)
-        if panel.frame != frame { panel.setFrame(frame, display: true) }
-        if makeKey {
+        let visible = panel.isVisible
+        if panel.frame != frame { panel.setFrame(frame, display: visible) }
+        if !visible {
+            if makeKey {
+                DockWindowMotion.present(panel) { panel.makeKeyAndOrderFront(nil) }
+            } else {
+                // Keep the hover destination visible and able to accept a drop from the first frame.
+                panel.orderFrontRegardless()
+            }
+        } else if makeKey && !panel.isKeyWindow {
             panel.makeKeyAndOrderFront(nil)
-        } else if !panel.isVisible {
-            panel.orderFrontRegardless()
         }
     }
 

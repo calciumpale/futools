@@ -24,6 +24,15 @@ struct HotKey: Codable, Equatable {
         keyLabel: "Space"
     )
 
+    static let copilotDefaultValue = HotKey(
+        keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey | optionKey), keyLabel: "K"
+    )
+
+    static let copilotFallbacks = [
+        HotKey(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey | optionKey | shiftKey), keyLabel: "K"),
+        HotKey(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey | optionKey | cmdKey), keyLabel: "K")
+    ]
+
     private static let modifierKeys: [(appKit: NSEvent.ModifierFlags, carbon: UInt32, label: String)] = [
         (.control, UInt32(controlKey), "⌃"),
         (.option, UInt32(optionKey), "⌥"),

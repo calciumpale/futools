@@ -64,6 +64,10 @@ struct OCRImage: Sendable {
         return NSImage(cgImage: thumbnail, size: .zero)
     }
 
+    func localRecognitionImage() throws -> CGImage {
+        try thumbnail(maximumDimension: 3_072)
+    }
+
     fileprivate func uploadPNG() throws -> Data {
         let image = try thumbnail(maximumDimension: 6_144)
         let output = NSMutableData()

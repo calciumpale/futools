@@ -14,6 +14,7 @@ struct PaletteTextEditor: NSViewRepresentable {
     var placeholder = ""
     var placeholderColor: Color?
     var fixedViewportHeight: CGFloat?
+    var fixedTextVerticalInset: CGFloat?
     var isSearchEditor = false
     var onCommand: ((Selector) -> Bool)?
     var onOptimize: (() -> Void)?
@@ -38,7 +39,7 @@ struct PaletteTextEditor: NSViewRepresentable {
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.lineFragmentPadding = 0
         let font = NSFont.systemFont(ofSize: fontSize, weight: isSearchEditor ? .medium : .regular)
-        let verticalInset = fixedViewportHeight.map {
+        let verticalInset = fixedTextVerticalInset ?? fixedViewportHeight.map {
             max(0, floor(($0 - NSLayoutManager().defaultLineHeight(for: font)) / 2))
         } ?? (isSearchEditor ? 9 : 5)
         editor.textContainerInset = NSSize(width: 1, height: verticalInset)

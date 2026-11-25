@@ -111,6 +111,7 @@ private struct VoicePressSurface: NSViewRepresentable {
         }
 
         override var mouseDownCanMoveWindow: Bool { false }
+        override var needsPanelToBecomeKey: Bool { enabled && phase != .finishing }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         func update(phase: VoiceInputController.Phase, enabled: Bool, canPressAnywhere: Bool, onBegin: @escaping () -> Void,
@@ -134,7 +135,7 @@ private struct VoicePressSurface: NSViewRepresentable {
             }
             let pressHelp = canPressAnywhere
                 ? "面板打开时，可直接长按触控板，松开后转写。"
-                : "可按住麦克风说话。要直接长按触控板，请在系统设置中允许辅助功能。"
+                : "可按住麦克风说话，松开后转写。"
             toolTip = phase == .idle ? pressHelp : label
             setAccessibilityLabel(label)
             setAccessibilityHelp("\(pressHelp)旁白按一次开始说话，再按一次结束。")
@@ -180,13 +181,15 @@ private struct VoicePressSurface: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) { endPointerHold() }
 
         override func accessibilityPerformPress() -> Bool {
-            guard enabled, window?.isVisible == true else { return false }
+            guard enabled, let window, window.isVisible else { return false }
             if hold == .accessibility {
                 _ = clearHold()
                 onEnd?()
                 return true
             }
             guard phase == .idle, hold == nil else { return false }
+            if !window.isKeyWindow { window.makeKey() }
+            guard window.isKeyWindow else { return false }
             token = UUID()
             hold = .accessibility
             onBegin?()

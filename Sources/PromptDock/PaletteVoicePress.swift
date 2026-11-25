@@ -18,7 +18,7 @@ final class PaletteVoicePress {
     private var timer: Timer?
     private var generation = 0
 
-    var canBegin: (() -> Bool)?
+    var canBegin: ((CGPoint) -> Bool)?
     var onBegin: (() -> Void)?
     var onEnd: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -62,7 +62,7 @@ final class PaletteVoicePress {
         case .leftMouseDown:
             guard press == nil else { return true }
             guard event.flags.intersection(Self.modifiers).isEmpty,
-                  canBegin?() == true, let down = event.copy() else { return false }
+                  canBegin?(event.location) == true, let down = event.copy() else { return false }
             press = Press(down: down)
             let timer = Timer(timeInterval: Self.holdDuration, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated { self?.beginHold() }
@@ -115,8 +115,8 @@ final class PaletteVoicePress {
 
     private func beginHold() {
         timer = nil
-        guard press != nil, canBegin?() == true else { return }
-        press?.isHolding = true
+        guard let press, canBegin?(press.down.location) == true else { return }
+        self.press?.isHolding = true
         onBegin?()
     }
 

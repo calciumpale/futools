@@ -28,7 +28,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
             self?.window?.pendingEnter = nil
             self?.window?.searchField?.unmarkText()
         }
-        voicePress.canBegin = { [weak self] in
+        voicePress.canBegin = { [weak self] _ in
             guard let self else { return false }
             return self.isVisible && self.window?.isKeyWindow == true &&
                 self.model.canStartVoice
@@ -372,8 +372,10 @@ private struct PaletteView: View {
                 Group {
                     if model.showsOCR {
                         PaletteOCRImagePane(image: model.screenshotPreview, colors: colors)
+                            .transition(DockMotion.pageReveal(reduceMotion: reduceMotion))
                     } else {
                         results
+                            .transition(DockMotion.pageReveal(reduceMotion: reduceMotion))
                     }
                 }
                 .frame(width: resultWidth)
@@ -383,11 +385,14 @@ private struct PaletteView: View {
                         text: $model.ocrResult, isRecognizing: model.isRecognizing,
                         error: model.screenshotError, colors: colors, onRetry: model.runOCR
                     )
+                    .transition(DockMotion.pageReveal(reduceMotion: reduceMotion))
                 } else {
                     preview
+                        .transition(DockMotion.pageReveal(reduceMotion: reduceMotion))
                 }
             }
             .frame(maxHeight: .infinity)
+            .animation(DockMotion.page(reduceMotion: reduceMotion), value: model.showsOCR)
             optimizationError
             separator
             footer
@@ -426,6 +431,7 @@ private struct PaletteView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 17)
                     .padding(.vertical, 7)
+                    .contentTransition(.opacity)
                     .transition(DockMotion.reveal(reduceMotion: reduceMotion))
             }
         }
@@ -589,6 +595,7 @@ private struct PaletteView: View {
                 Spacer()
                 Text("\(model.matches.count) 条")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .frame(minWidth: 43, alignment: .trailing)
                     .contentTransition(.opacity)
                     .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: model.matches.count)
                     .accessibilityLabel("\(model.matches.count) 条提示词")
@@ -681,22 +688,34 @@ private struct PaletteView: View {
     }
 
     private var preview: some View {
-        Group {
-            if let prompt = model.selectedPrompt {
+        let prompt = model.selectedPrompt
+        return ZStack(alignment: .topLeading) {
+            if let prompt {
                 savedPromptPreview(prompt)
             } else if optimizer.hasResult {
                 optimizedPreview
-            } else if optimizer.isOptimizing {
-                Label("正在优化提示词…", systemImage: "sparkles")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(colors.secondary)
-            } else {
-                Color.clear
             }
+            optimizationProgress(prompt == nil && !optimizer.hasResult && optimizer.isOptimizing)
         }
         .padding(15)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(colors.preview)
+    }
+
+    private func optimizationProgress(_ shown: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            if shown {
+                HStack(spacing: 7) {
+                    DockActivityGlyph(isBusy: true)
+                    Text("正在优化提示词…")
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(colors.secondary)
+                .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: shown)
+        .allowsHitTesting(false)
     }
 
     private func savedPromptPreview(_ prompt: Prompt) -> some View {
@@ -730,6 +749,8 @@ private struct PaletteView: View {
                             .font(.system(size: 14))
                             .lineSpacing(4)
                             .foregroundStyle(colors.body)
+                            .contentTransition(.opacity)
+                            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: prompt.id)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -779,9 +800,11 @@ private struct PaletteView: View {
     private var footer: some View {
         let buttonShape = RoundedRectangle(cornerRadius: 8)
         let canRunOptimization = model.canOptimize || optimizer.isOptimizing
+        let canInsert = model.insertionText != nil
         return HStack(spacing: 8) {
             footerKeyHints
                 .opacity(model.showsOCR ? 0 : 1)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: model.showsOCR)
                 .accessibilityHidden(model.showsOCR)
             Spacer(minLength: 4)
             Button {
@@ -824,10 +847,11 @@ private struct PaletteView: View {
                 .foregroundStyle(Color.white)
                 .frame(width: 84, height: 30)
                 .background(colors.action, in: buttonShape)
-                .opacity(model.insertionText == nil ? 0.4 : 1)
+                .opacity(canInsert ? 1 : 0.4)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: canInsert)
             }
             .buttonStyle(DockPressStyle())
-            .disabled(model.insertionText == nil)
+            .disabled(!canInsert)
             .accessibilityLabel(insertTitle)
             .help(insertTitle)
         }

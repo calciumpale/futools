@@ -22,6 +22,7 @@ struct LibraryView: View {
     private let shortcutRecorder: ShortcutRecorder
     private let onSaveShortcut: (HotKey) -> String?
     private let onSaveCompactShortcut: (HotKey) -> String?
+    private let onSaveCopilotShortcut: (HotKey) -> String?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -39,12 +40,14 @@ struct LibraryView: View {
         showSettings: Bool = false,
         shortcutRecorder: ShortcutRecorder,
         onSaveShortcut: @escaping (HotKey) -> String?,
-        onSaveCompactShortcut: @escaping (HotKey) -> String?
+        onSaveCompactShortcut: @escaping (HotKey) -> String?,
+        onSaveCopilotShortcut: @escaping (HotKey) -> String? = { _ in nil }
     ) {
         self.store = store
         self.shortcutRecorder = shortcutRecorder
         self.onSaveShortcut = onSaveShortcut
         self.onSaveCompactShortcut = onSaveCompactShortcut
+        self.onSaveCopilotShortcut = onSaveCopilotShortcut
         _showingSettings = State(initialValue: showSettings)
         let selected = store.prompts.first { $0.id == selectedID } ?? store.prompts.first
         _draft = State(initialValue: startNew ? Draft.new(body: newBody) : selected.map(Draft.saved))
@@ -61,20 +64,18 @@ struct LibraryView: View {
             header
             Rectangle().fill(colors.line).frame(height: 1)
             storageNotice
-            if showingSettings {
-                LibrarySettings(store: store, colors: colors, shortcutRecorder: shortcutRecorder,
-                                onSaveShortcut: onSaveShortcut, onSaveCompactShortcut: onSaveCompactShortcut)
-            } else {
-                HStack(spacing: 0) {
-                    sidebar
-                    Rectangle().fill(colors.line).frame(width: 1)
-                    if let draft = Binding($draft) {
-                        editor(draft)
-                    } else {
-                        emptyEditor
-                    }
+            ZStack {
+                if showingSettings {
+                    LibrarySettings(store: store, colors: colors, shortcutRecorder: shortcutRecorder,
+                                    onSaveShortcut: onSaveShortcut, onSaveCompactShortcut: onSaveCompactShortcut,
+                                    onSaveCopilotShortcut: onSaveCopilotShortcut)
+                        .transition(DockMotion.pageReveal(reduceMotion: reduceMotion))
+                } else {
+                    libraryPage
+                        .transition(DockMotion.pageReveal(reduceMotion: reduceMotion))
                 }
             }
+            .animation(DockMotion.page(reduceMotion: reduceMotion), value: showingSettings)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colors.background)
@@ -86,6 +87,18 @@ struct LibraryView: View {
         }
         .task(id: draft?.value.id) {
             if !showingSettings, draft?.original == nil { titleFocused = draft != nil }
+        }
+    }
+
+    private var libraryPage: some View {
+        HStack(spacing: 0) {
+            sidebar
+            Rectangle().fill(colors.line).frame(width: 1)
+            if let draft = Binding($draft) {
+                editor(draft)
+            } else {
+                emptyEditor
+            }
         }
     }
 
@@ -156,6 +169,9 @@ struct LibraryView: View {
                     Text(store.prompts.count.formatted())
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(colors.secondary)
+                        .frame(minWidth: 30, alignment: .trailing)
+                        .contentTransition(.opacity)
+                        .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: store.prompts.count)
                         .accessibilityLabel("共 \(store.prompts.count) 条提示词")
                 }
                 Button { navigate(.new) } label: {
@@ -417,10 +433,23 @@ struct LibraryView: View {
 @MainActor
 private struct LibrarySettings: View {
     private enum ShortcutRow: Hashable {
-        case command, compact
+        case command, compact, copilot
 
-        var title: String { self == .command ? "命令面板" : "精简模式" }
-        var defaultShortcut: HotKey { self == .command ? .defaultValue : .compactDefaultValue }
+        var title: String {
+            switch self {
+            case .command: return "命令面板"
+            case .compact: return "精简模式"
+            case .copilot: return "侧边 Copilot"
+            }
+        }
+
+        var defaultShortcut: HotKey {
+            switch self {
+            case .command: return .defaultValue
+            case .compact: return .compactDefaultValue
+            case .copilot: return .copilotDefaultValue
+            }
+        }
     }
 
     @ObservedObject var store: PromptStore
@@ -428,6 +457,7 @@ private struct LibrarySettings: View {
     @ObservedObject var shortcutRecorder: ShortcutRecorder
     let onSaveShortcut: (HotKey) -> String?
     let onSaveCompactShortcut: (HotKey) -> String?
+    let onSaveCopilotShortcut: (HotKey) -> String?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewState private var recordingRow: ShortcutRow?
@@ -446,11 +476,13 @@ private struct LibrarySettings: View {
                     .padding(.bottom, 2)
 
                 section("全局快捷键", icon: "command") {
-                    Text("用快捷键打开或关闭命令面板，也可开启或关闭精简模式。")
+                    Text("用快捷键打开或关闭命令面板、精简模式和侧边 Copilot。")
                         .foregroundStyle(colors.secondary)
                     shortcutControls(.command)
                     Divider()
                     shortcutControls(.compact)
+                    Divider()
+                    shortcutControls(.copilot)
                 }
 
                 section("外观", icon: "circle.lefthalf.filled") {
@@ -473,6 +505,7 @@ private struct LibrarySettings: View {
                             SettingsButton(title: "打开系统设置", colors: colors, action: PasteService.requestPermission)
                         }
                     }
+                    .frame(minHeight: 32)
                 }
 
                 section("DeepSeek API", icon: "key") {
@@ -540,7 +573,7 @@ private struct LibrarySettings: View {
             HStack(spacing: 9) {
                 Text(row.title)
                     .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: 84, alignment: .leading)
                 ZStack {
                     Text(keyText)
                         .id(keyText)
@@ -586,7 +619,11 @@ private struct LibrarySettings: View {
     }
 
     private func currentShortcut(for row: ShortcutRow) -> HotKey {
-        row == .command ? store.shortcut : store.compactShortcut
+        switch row {
+        case .command: return store.shortcut
+        case .compact: return store.compactShortcut
+        case .copilot: return store.copilotShortcut
+        }
     }
 
     private func toggleRecording(for row: ShortcutRow) {
@@ -619,14 +656,17 @@ private struct LibrarySettings: View {
     }
 
     private func applyShortcut(_ shortcut: HotKey, for row: ShortcutRow) {
-        let save = row == .command ? onSaveShortcut : onSaveCompactShortcut
-        shortcutErrors[row] = save(shortcut)
+        switch row {
+        case .command: shortcutErrors[row] = onSaveShortcut(shortcut)
+        case .compact: shortcutErrors[row] = onSaveCompactShortcut(shortcut)
+        case .copilot: shortcutErrors[row] = onSaveCopilotShortcut(shortcut)
+        }
         if shortcutErrors[row] == nil { stopRecording() }
     }
 }
 
 private struct SettingsButton: View {
-    enum Tone {
+    enum Tone: Equatable {
         case neutral, primary, selected
     }
 
@@ -639,6 +679,7 @@ private struct SettingsButton: View {
     let action: () -> Void
 
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 8)
@@ -649,7 +690,7 @@ private struct SettingsButton: View {
                     Image(systemName: symbol)
                         .accessibilityHidden(true)
                 }
-                Text(title)
+                Text(title).contentTransition(.opacity)
             }
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(foreground)
@@ -659,6 +700,8 @@ private struct SettingsButton: View {
             .background(fill, in: shape)
             .overlay { shape.strokeBorder(border).allowsHitTesting(false) }
             .contentShape(shape)
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: tone)
+            .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: isEnabled)
         }
         .buttonStyle(DockPressStyle())
     }

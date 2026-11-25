@@ -16,6 +16,7 @@ final class PromptStore: ObservableObject {
     }
     @Published private(set) var shortcut = HotKey.defaultValue
     @Published private(set) var compactShortcut = HotKey.compactDefaultValue
+    @Published private(set) var copilotShortcut = HotKey.copilotDefaultValue
     @Published private(set) var storageError: String?
 
     private struct Library: Codable {
@@ -23,10 +24,16 @@ final class PromptStore: ObservableObject {
         var shortcut: HotKey
         // Older libraries omit this key.
         var compactShortcut: HotKey?
+        var copilotShortcut: HotKey?
 
         var resolvedCompactShortcut: HotKey {
             if let compactShortcut, compactShortcut != shortcut { return compactShortcut }
             return shortcut == .compactDefaultValue ? .compactLegacyFallback : .compactDefaultValue
+        }
+
+        var resolvedCopilotShortcut: HotKey {
+            let candidates = [copilotShortcut ?? .copilotDefaultValue, .copilotDefaultValue] + HotKey.copilotFallbacks
+            return candidates.first { $0 != shortcut && $0 != resolvedCompactShortcut } ?? .copilotDefaultValue
         }
     }
 
@@ -62,6 +69,7 @@ final class PromptStore: ObservableObject {
             prompts = library.prompts
             shortcut = library.shortcut
             compactShortcut = library.resolvedCompactShortcut
+            copilotShortcut = library.resolvedCopilotShortcut
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             prompts = Self.starterPrompts
         } catch {
@@ -79,14 +87,14 @@ final class PromptStore: ObservableObject {
         } else {
             updated.append(prompt)
         }
-        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut))
+        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut, copilotShortcut: copilotShortcut))
     }
 
     @discardableResult
     func remove(_ id: UUID) -> Bool {
         let updated = prompts.filter { $0.id != id }
         guard updated.count != prompts.count else { return true }
-        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut))
+        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut, copilotShortcut: copilotShortcut))
     }
 
     @discardableResult
@@ -103,17 +111,22 @@ final class PromptStore: ObservableObject {
         var updated = prompts
         let moved = updated.remove(at: sourceIndex)
         updated.insert(moved, at: insertionIndex)
-        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut))
+        return save(Library(prompts: updated, shortcut: shortcut, compactShortcut: compactShortcut, copilotShortcut: copilotShortcut))
     }
 
     @discardableResult
     func setShortcut(_ shortcut: HotKey) -> Bool {
-        save(Library(prompts: prompts, shortcut: shortcut, compactShortcut: compactShortcut))
+        save(Library(prompts: prompts, shortcut: shortcut, compactShortcut: compactShortcut, copilotShortcut: copilotShortcut))
     }
 
     @discardableResult
     func setCompactShortcut(_ shortcut: HotKey) -> Bool {
-        save(Library(prompts: prompts, shortcut: self.shortcut, compactShortcut: shortcut))
+        save(Library(prompts: prompts, shortcut: self.shortcut, compactShortcut: shortcut, copilotShortcut: copilotShortcut))
+    }
+
+    @discardableResult
+    func setCopilotShortcut(_ shortcut: HotKey) -> Bool {
+        save(Library(prompts: prompts, shortcut: self.shortcut, compactShortcut: compactShortcut, copilotShortcut: shortcut))
     }
 
     func matching(_ query: String) -> [Prompt] {
@@ -157,8 +170,9 @@ final class PromptStore: ObservableObject {
 
     private func save(_ library: Library) -> Bool {
         guard !hasUnreadableLibrary else { return false }
-        guard library.compactShortcut != library.shortcut else {
-            storageError = "命令面板和简洁模式需要使用不同的快捷键。"
+        guard library.compactShortcut != library.shortcut, library.copilotShortcut != library.shortcut,
+              library.copilotShortcut != library.compactShortcut else {
+            storageError = "命令面板、精简模式和侧边 Copilot 需要使用不同的快捷键。"
             return false
         }
 
@@ -174,6 +188,7 @@ final class PromptStore: ObservableObject {
         prompts = library.prompts
         shortcut = library.shortcut
         compactShortcut = library.resolvedCompactShortcut
+        copilotShortcut = library.resolvedCopilotShortcut
         storageError = nil
         return true
     }

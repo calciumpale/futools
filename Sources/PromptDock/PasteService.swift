@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
 
@@ -14,6 +15,13 @@ enum PasteOutcome: Equatable {
 
 @MainActor
 final class PasteService {
+    enum Destination { case standard, conversation }
+
+    private enum Payload {
+        case text(String)
+        case attachment(URL)
+    }
+
     private static let terminalBundleIdentifiers: Set<String> = [
         "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty",
         "net.kovidgoyal.kitty", "org.alacritty", "io.alacritty", "com.github.wez.wezterm",
@@ -35,25 +43,39 @@ final class PasteService {
     }
 
     func paste(_ text: String, into app: NSRunningApplication?,
-               targetIsFocused: (@MainActor () -> Bool)? = nil) async -> PasteOutcome {
-        guard !text.isEmpty, !isPasting else { return .failed }
+               targetIsFocused: (@MainActor () -> Bool)? = nil,
+               destination: Destination = .standard) async -> PasteOutcome {
+        guard !text.isEmpty else { return .failed }
+        return await paste(.text(text), into: app, targetIsFocused: targetIsFocused, destination: destination)
+    }
+
+    func pasteAttachment(_ url: URL, into app: NSRunningApplication,
+                         targetIsFocused: @escaping @MainActor () -> Bool) async -> PasteOutcome {
+        guard let localURL = localAttachmentURL(url) else { return .failed }
+        return await paste(.attachment(localURL), into: app, targetIsFocused: targetIsFocused, destination: .conversation)
+    }
+
+    private func paste(_ payload: Payload, into app: NSRunningApplication?,
+                       targetIsFocused: (@MainActor () -> Bool)?, destination: Destination) async -> PasteOutcome {
+        guard !isPasting else { return .failed }
         isPasting = true
         defer { isPasting = false }
 
         let board = NSPasteboard.general
+        let allowCopyFallback = destination == .standard
         guard let app, !app.isTerminated, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
             if targetIsFocused != nil { return .targetLostFocus }
-            return copy(text, to: board, otherwise: .copiedNoTarget)
+            return allowCopyFallback ? copy(payload, to: board, otherwise: .copiedNoTarget) : .failed
         }
         guard targetIsFocused?() != false else { return .targetLostFocus }
-        if let bundleIdentifier = app.bundleIdentifier,
+        if case let .text(text) = payload, let bundleIdentifier = app.bundleIdentifier,
            Self.terminalBundleIdentifiers.contains(bundleIdentifier),
            text.rangeOfCharacter(from: .newlines) != nil {
             // A shell without bracketed paste can interpret pasted newlines as submissions.
-            return copy(text, to: board, otherwise: .copiedTerminal)
+            return allowCopyFallback ? copy(payload, to: board, otherwise: .copiedTerminal) : .failed
         }
         guard Self.hasPermission else {
-            return copy(text, to: board, otherwise: .copiedNoPermission)
+            return allowCopyFallback ? copy(payload, to: board, otherwise: .copiedNoPermission) : .failed
         }
 
         // Give the dismissed panel time to return keyboard focus to the original app.
@@ -62,7 +84,7 @@ final class PasteService {
         let pid = app.processIdentifier
         guard isFrontmost(pid) else {
             if targetIsFocused != nil { return .targetLostFocus }
-            return copy(text, to: board, otherwise: .copiedTargetChanged)
+            return allowCopyFallback ? copy(payload, to: board, otherwise: .copiedTargetChanged) : .failed
         }
         guard targetIsFocused?() != false else { return .targetLostFocus }
         let keyCode = pasteKeyCode()
@@ -75,32 +97,82 @@ final class PasteService {
         let previousItems = snapshot(board)
         let canRestore = board.changeCount == previousChange
         guard targetIsFocused?() != false else { return .targetLostFocus }
-        guard let pasteChange = write(text, to: board) else { return .failed }
+        guard let pasteChange = write(payload, to: board) else { return .failed }
         if targetIsFocused?() == false {
             if canRestore, let previousItems { restore(previousItems, on: board, ifUnchangedSince: pasteChange) }
             return .targetLostFocus
         }
         guard isFrontmost(pid) else {
-            if targetIsFocused != nil {
+            if targetIsFocused != nil || !allowCopyFallback {
                 if canRestore, let previousItems { restore(previousItems, on: board, ifUnchangedSince: pasteChange) }
                 return .targetLostFocus
             }
             return .copiedTargetChanged
         }
-        guard Self.hasPermission else { return .copiedNoPermission }
+        guard Self.hasPermission else {
+            if allowCopyFallback { return .copiedNoPermission }
+            if canRestore, let previousItems { restore(previousItems, on: board, ifUnchangedSince: pasteChange) }
+            return .failed
+        }
         guard board.changeCount == pasteChange else { return .failed }
 
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-        keyDown.postToPid(pid)
-        keyUp.postToPid(pid)
+        let menuItem = destination == .conversation ? pasteMenuItem(pid: pid) : nil
+        let outcome: PasteOutcome
+        if !isFrontmost(pid) || targetIsFocused?() == false {
+            outcome = .targetLostFocus
+        } else if board.changeCount != pasteChange {
+            outcome = .failed
+        } else {
+            let menuResult = menuItem.map { AXUIElementPerformAction($0, kAXPressAction as CFString) }
+            switch menuResult {
+            case .success:
+                outcome = .pasted
+            case .cannotComplete:
+                // An AX timeout can leave the action in flight. A second paste may duplicate the text.
+                outcome = .failed
+            default:
+                keyDown.flags = .maskCommand
+                keyUp.flags = .maskCommand
+                keyDown.postToPid(pid)
+                keyUp.postToPid(pid)
+                outcome = .pasted
+            }
+        }
 
         if canRestore, let previousItems {
             // The target handles Cmd+V asynchronously. Restore only while our temporary item is current.
-            try? await Task.sleep(for: .milliseconds(650))
+            if outcome != .targetLostFocus { try? await Task.sleep(for: .milliseconds(650)) }
             restore(previousItems, on: board, ifUnchangedSince: pasteChange)
         }
-        return .pasted
+        return outcome
+    }
+
+    private func pasteMenuItem(pid: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+
+        func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+            var result: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &result) == .success else { return nil }
+            return result
+        }
+        func children(_ element: AXUIElement) -> [AXUIElement] {
+            AXUIElementSetMessagingTimeout(element, 0.15)
+            return value(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        }
+
+        guard let bar = value(app, kAXMenuBarAttribute), CFGetTypeID(bar) == AXUIElementGetTypeID() else { return nil }
+        let editTitles = ["编辑", "編輯", "Edit"]
+        let pasteTitles = ["粘贴", "貼上", "貼上文字", "Paste"]
+        for menu in children(bar as! AXUIElement) {
+            guard let title = value(menu, kAXTitleAttribute) as? String, editTitles.contains(title) else { continue }
+            for item in children(menu).flatMap(children) {
+                guard let title = value(item, kAXTitleAttribute) as? String, pasteTitles.contains(title),
+                      value(item, kAXEnabledAttribute) as? Bool == true else { continue }
+                return item
+            }
+        }
+        return nil
     }
 
     private func isFrontmost(_ pid: pid_t) -> Bool {
@@ -125,14 +197,31 @@ final class PasteService {
         return keyboardCodes.first { $0 != ansiV && commandCharacter(for: $0) == "v" } ?? ansiV
     }
 
-    private func copy(_ text: String, to board: NSPasteboard, otherwise outcome: PasteOutcome) -> PasteOutcome {
-        write(text, to: board) != nil ? outcome : .failed
+    private func localAttachmentURL(_ url: URL) -> URL? {
+        guard url.isFileURL, url.path.hasPrefix("/") else { return nil }
+        if let host = url.host, !host.isEmpty && host.lowercased() != "localhost" { return nil }
+        let localURL = URL(fileURLWithPath: url.path).resolvingSymlinksInPath()
+        guard let values = try? localURL.resourceValues(forKeys: [.isRegularFileKey, .isReadableKey, .volumeIsLocalKey]),
+              values.isRegularFile == true, values.isReadable == true, values.volumeIsLocal == true else { return nil }
+        return localURL
     }
 
-    private func write(_ text: String, to board: NSPasteboard) -> Int? {
-        let change = board.declareTypes([.string], owner: nil)
-        guard board.setString(text, forType: .string), board.changeCount == change else { return nil }
-        return change
+    private func copy(_ payload: Payload, to board: NSPasteboard, otherwise outcome: PasteOutcome) -> PasteOutcome {
+        write(payload, to: board) != nil ? outcome : .failed
+    }
+
+    private func write(_ payload: Payload, to board: NSPasteboard) -> Int? {
+        let change: Int
+        switch payload {
+        case .text(let text):
+            change = board.declareTypes([.string], owner: nil)
+            guard board.setString(text, forType: .string) else { return nil }
+        case .attachment(let url):
+            guard let currentURL = localAttachmentURL(url), currentURL == url else { return nil }
+            change = board.clearContents()
+            guard board.writeObjects([url as NSURL]) else { return nil }
+        }
+        return board.changeCount == change ? change : nil
     }
 
     private func restore(_ items: [NSPasteboardItem], on board: NSPasteboard, ifUnchangedSince change: Int) {

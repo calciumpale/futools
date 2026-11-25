@@ -121,24 +121,33 @@ struct DeepSeekSettingsContent: View {
 
     @CredentialState private var input = ""
     @CredentialState private var hasKey: Bool?
-    @CredentialState private var isBusy = false
+    @CredentialState private var activity: Activity?
     @CredentialState private var feedback: Feedback?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private var isBusy: Bool { activity != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("运行优化时会将草稿发送给 DeepSeek，运行 OCR 时会发送截图。两项功能共用保存在 macOS 钥匙串的密钥。")
+            Text("优化提示词会将草稿发送给 DeepSeek，截图 OCR 会发送截图，微信和飞书的回复建议会发送聊天文字及你填写的回复意图。聊天截图在本机识别。API Key 保存在 macOS 钥匙串。")
                 .foregroundStyle(colors.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(verbatim: "\(DeepSeekPromptAPI.modelID)  ·  \(DeepSeekPromptAPI.baseURL.absoluteString)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(colors.secondary)
-                Spacer()
-                Label(statusText, systemImage: hasKey == true ? "checkmark.circle.fill" : "circle.dotted")
-                    .foregroundStyle(hasKey == true ? colors.accent : colors.secondary)
-                    .contentTransition(.opacity)
-                    .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: statusText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 10)
+                HStack(spacing: 5) {
+                    DockActivityGlyph(isBusy: isBusy, idleSymbol: hasKey == true ? "checkmark.circle.fill" : "circle.dotted")
+                    Text(statusText).contentTransition(.opacity)
+                }
+                .foregroundStyle(hasKey == true && !isBusy ? colors.accent : colors.secondary)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 89, alignment: .trailing)
+                .accessibilityElement(children: .combine)
+                .animation(DockMotion.feedback(reduceMotion: reduceMotion), value: statusText)
             }
             HStack(spacing: 8) {
                 SecureField(hasKey == true ? "输入新密钥" : "输入密钥", text: $input)
@@ -171,12 +180,13 @@ struct DeepSeekSettingsContent: View {
             }
             .animation(DockMotion.transition(reduceMotion: reduceMotion), value: feedback?.message)
         }
-        .onAppear { run { try DeepSeekKeychain.exists() } }
+        .onAppear { run(.checking) { try DeepSeekKeychain.exists() } }
         .onDisappear { input = "" }
     }
 
     private var statusText: String {
-        guard let hasKey else { return isBusy ? "正在检查…" : "状态未知" }
+        if let activity { return activity.label }
+        guard let hasKey else { return "状态未知" }
         return hasKey ? "已配置密钥" : "未配置密钥"
     }
 
@@ -184,7 +194,7 @@ struct DeepSeekSettingsContent: View {
         let key = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isBusy, !key.isEmpty else { return }
         input = ""
-        run(success: "已保存到钥匙串。") {
+        run(.saving, success: "已保存到钥匙串。") {
             try DeepSeekKeychain.save(key)
             return true
         }
@@ -193,25 +203,37 @@ struct DeepSeekSettingsContent: View {
     private func remove() {
         guard hasKey == true else { return }
         input = ""
-        run(success: "已移除本机密钥。") {
+        run(.removing, success: "已移除本机密钥。") {
             try DeepSeekKeychain.remove()
             return false
         }
     }
 
-    private func run(success: String? = nil, operation: @escaping @Sendable () throws -> Bool) {
+    private func run(_ activity: Activity, success: String? = nil, operation: @escaping @Sendable () throws -> Bool) {
         guard !isBusy else { return }
-        isBusy = true
+        self.activity = activity
         feedback = nil
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated, operation: operation).result
-            isBusy = false
+            self.activity = nil
             switch result {
             case .success(let exists):
                 hasKey = exists
                 feedback = success.map { Feedback(message: $0, isError: false) }
             case .failure(let error):
                 feedback = Feedback(message: error.localizedDescription, isError: true)
+            }
+        }
+    }
+
+    private enum Activity {
+        case checking, saving, removing
+
+        var label: String {
+            switch self {
+            case .checking: return "正在检查…"
+            case .saving: return "正在保存…"
+            case .removing: return "正在移除…"
             }
         }
     }

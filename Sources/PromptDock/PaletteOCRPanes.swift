@@ -47,6 +47,16 @@ struct PaletteOCRResultPane: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private enum Phase: Equatable {
+        case recognizing, failure(String), result
+    }
+
+    private var phase: Phase {
+        if isRecognizing { return .recognizing }
+        if let error { return .failure(error) }
+        return .result
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("识别结果")
@@ -55,47 +65,56 @@ struct PaletteOCRResultPane: View {
                 .accessibilityAddTraits(.isHeader)
 
             ZStack {
-                if isRecognizing {
-                    HStack(spacing: 7) {
-                        DockActivityGlyph(isBusy: true)
-                        Text("正在识别截图…")
-                    }
-                    .font(.system(size: 13))
-                    .foregroundStyle(colors.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
-                } else if let error {
-                    errorContent(error)
-                        .transition(DockMotion.reveal(reduceMotion: reduceMotion))
-                } else {
+                if phase == .result {
                     PaletteTextEditor(
                         text: $text, label: "识别结果正文", fontSize: 14,
                         textColor: colors.body, accentColor: colors.accent
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
                 }
+                status(phase)
             }
-            .animation(DockMotion.transition(reduceMotion: reduceMotion), value: isRecognizing)
-            .animation(DockMotion.transition(reduceMotion: reduceMotion), value: error != nil)
         }
         .padding(15)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(colors.preview)
     }
 
+    private func status(_ phase: Phase) -> some View {
+        ZStack {
+            switch phase {
+            case .recognizing:
+                HStack(spacing: 7) {
+                    DockActivityGlyph(isBusy: true)
+                    Text("正在识别截图…")
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(colors.secondary)
+                .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            case .failure(let error):
+                errorContent(error)
+                    .transition(DockMotion.reveal(reduceMotion: reduceMotion))
+            case .result:
+                Color.clear.accessibilityHidden(true)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(phase != .result)
+        .animation(DockMotion.transition(reduceMotion: reduceMotion), value: phase)
+    }
+
     private func errorContent(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ScrollView {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
                 Label(message, systemImage: "exclamationmark.circle")
                     .font(.system(size: 13))
                     .foregroundStyle(colors.warning)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentTransition(.opacity)
+                Button("重试", action: onRetry)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
             }
-            Button("重试", action: onRetry)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
