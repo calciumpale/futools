@@ -169,7 +169,7 @@ enum DeepSeekAPIChecks {
                            "The JSON prompt must request the exact count and preserve the user's perspective.")
             }
         }
-        try expect(DeepSeekPromptAPI.WeChatTone.allCases.map(\.title) == ["自然", "活泼", "沉稳", "简洁", "礼貌"],
+        try expect(DeepSeekPromptAPI.WeChatTone.allCases.map(\.title) == ["自然", "活泼", "沉稳", "简洁", "礼貌", "搞怪", "反讽", "有趣", "正式"],
                    "Expected all public tone options to have the intended labels.")
     }
 

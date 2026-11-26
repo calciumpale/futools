@@ -50,7 +50,6 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     private var pendingReplyRequest: ConversationRequest?
     private var pendingReplies: (replies: [String], intent: String, scope: ConversationScope)?
     private var suggestion: Task<Void, Never>?
-    private var polishTask: Task<Void, Never>?
     private var draftSubscription: AnyCancellable?
     private static let weChatCountKey = "weChatReplyCount"
     private static let weChatToneKey = "weChatReplyTone"
@@ -93,7 +92,6 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         replyControls.onSuggest = { [weak self] in self?.suggestReply() }
         replyControls.onInsert = { [weak self] in self?.useReply() }
         replyControls.onDirectInsertText = { [weak self] text in self?.directInsertText(text) }
-        replyControls.onPolishDraft = { [weak self] in self?.polishReplyDraft() }
         let count = UserDefaults.standard.integer(forKey: Self.weChatCountKey)
         replyControls.replyCount = (1...3).contains(count) ? count : 1
         if let saved = UserDefaults.standard.string(forKey: Self.weChatToneKey),
@@ -103,6 +101,9 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
             self?.trackTarget()
         }
         replyControls.onChoose = { [weak self] in self?.chooseReplyOption($0) }
+        if isSidebar {
+            replyControls.onInsertChoice = { [weak self] in self?.chooseReplyOption($0, insert: true) }
+        }
         replyControls.onSetReplyCount = { [weak self] value in
             guard (1...3).contains(value) else { return }
             self?.replyControls.replyCount = value
@@ -124,7 +125,6 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
             guard let self else { return }
             if self.replyControls.insertionNotice != nil { self.replyControls.insertionNotice = nil }
             if self.suggestion != nil { self.cancelSuggestion() }
-            if self.polishTask != nil { self.cancelPolish() }
         }
         feedbackSubscription = Publishers.Merge3(
             voice.$phase.map { _ in () }, voice.$message.map { _ in () }, optimizer.$errorMessage.map { _ in () }
@@ -139,7 +139,6 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         tracking?.cancel()
         delivery?.cancel()
         suggestion?.cancel()
-        polishTask?.cancel()
         revealTask?.cancel()
         if let targetObservation { CFRunLoopSourceInvalidate(AXObserverGetRunLoopSource(targetObservation)) }
     }
@@ -359,9 +358,6 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
                 agent: copilotAgent,
                 onToggleDockSide: { [weak self] in self?.toggleDockSide() },
                 onClose: { [weak self] in self?.dismiss() },
-                onBeginVoice: { [weak self] in self?.beginVoice() },
-                onEndVoice: { [weak self] in self?.voice.finish() },
-                onCancelVoice: { [weak self] in self?.cancelVoice() },
                 onStageMaterial: { [weak self] in self?.stageMaterial($0) },
                 onDirectInsertText: { [weak self] text in self?.directInsertText(text) },
                 onStageAnswer: { [weak self] text in self?.optimizer.draft = text }
@@ -385,7 +381,7 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     }
 
     private func startVoicePress() {
-        guard !isSidebar, voicePressAvailable == nil, replyControls.phase != .inserting else { return }
+        guard voicePressAvailable == nil, replyControls.phase != .inserting else { return }
         voicePressAvailable = voicePress.start()
         replyControls.canPressAnywhere = voicePressAvailable == true
     }
@@ -538,8 +534,9 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     }
 
     private var canStartVoice: Bool {
-        isVisible && mayPresent?() != false && target?.isFrontmost == true && !optimizer.isOptimizing &&
-            delivery == nil && suggestion == nil && polishTask == nil &&
+        if isSidebar, let panel, panel.searchField?.window !== panel { return false }
+        return isVisible && mayPresent?() != false && target?.isFrontmost == true && !optimizer.isOptimizing &&
+            delivery == nil && suggestion == nil &&
             ![.confirming, .choosingTarget, .choosingReply, .inserting].contains(replyControls.phase) && voice.phase == .idle
     }
 
@@ -552,6 +549,12 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     }
 
     private func canBeginVoicePress(at point: CGPoint) -> Bool {
+        if isSidebar {
+            guard let panel, let editor = panel.searchField, editor.window === panel,
+                  let desktopTop = NSScreen.screens.first?.frame.maxY else { return false }
+            let editorFrame = panel.convertToScreen(editor.convert(editor.visibleRect, to: nil))
+            return quartzFrame(editorFrame, desktopTop: desktopTop).contains(point) && canStartVoice
+        }
         guard canStartVoice else { return false }
         return panel?.isKeyWindow == true || targetHasFocus || conversationVoiceArea?.contains(point) == true
     }
@@ -574,11 +577,11 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
 
     private func insertTranscript(_ text: String) {
         guard isVisible, let panel, panel.isKeyWindow else { return }
-        panel.focusSearch()
-        guard let editor = panel.searchField else {
-            optimizer.draft += text
+        guard let editor = panel.searchField, editor.window === panel else {
+            if !isSidebar { optimizer.draft += text }
             return
         }
+        panel.focusSearch()
         if editor.hasMarkedText() {
             editor.unmarkText()
             optimizer.draft = editor.string
@@ -726,6 +729,7 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         replyControls.pastedFullText = nil
         replyControls.recentSuggestions = []
         replyControls.matchedLibraryCount = 0
+        if replyControls.phase == .confirming { replyControls.phase = .idle }
         if replyControls.hasScreenshot { replyControls.hasScreenshot = false }
         if replyControls.pastedTextPreview != nil { replyControls.pastedTextPreview = nil }
     }
@@ -737,25 +741,37 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     }
 
     private func suggestReply() {
-        if suggestion != nil {
+        if suggestion != nil || [.choosingTarget, .choosingReply].contains(replyControls.phase) {
             cancelSuggestion()
             return
         }
-        cancelPolish()
-        guard let target, let conversation = target.conversationApp, isVisible, target.isCurrentWindow, delivery == nil, voice.phase == .idle,
-              let panel, let frame = target.windowFrame(),
-              let desktopTop = NSScreen.screens.first?.frame.maxY else { return }
-        guard ![.choosingTarget, .choosingReply, .inserting].contains(replyControls.phase) else { return }
+        guard let target, let conversation = target.conversationApp, isVisible, target.isCurrentWindow,
+              delivery == nil, voice.phase == .idle, let panel, let frame = target.windowFrame() else { return }
+        guard replyControls.phase != .inserting else { return }
+        commitReplyComposition()
         let pastedScreenshot = weChatScreenshot
         let pastedText = weChatPastedText
-        guard !replyControls.captureIsRestricted || pastedScreenshot != nil || pastedText != nil else { return }
         let region = chatRegion(for: target)
-        if region == nil && pastedText == nil && pastedScreenshot == nil {
-            if isSidebar { selectRegionAgain(continueSuggestion: true) }
-            return
+        let captureRegion = replyControls.captureIsRestricted ? nil : region
+        let hasContext = pastedText != nil || pastedScreenshot != nil || captureRegion != nil
+        let draft = optimizer.draft
+        if !hasContext {
+            guard isSidebar else { return }
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if !replyControls.captureIsRestricted { selectRegionAgain(continueSuggestion: true) }
+                return
+            }
         }
         panel.makeKeyAndOrderFront(nil)
         panel.focusSearch()
+        let scope = ConversationScope(target: target, session: sessionID, window: frame, region: region)
+        let tone = replyControls.replyTone
+        let count = replyControls.replyCount
+        if !hasContext {
+            suggestFromDraft(draft, tone: tone, count: count, scope: scope)
+            return
+        }
+
         if !UserDefaults.standard.bool(forKey: conversation.replyConsentKey) {
             if replyControls.phase != .confirming {
                 replyControls.phase = .confirming
@@ -765,18 +781,16 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
             UserDefaults.standard.set(true, forKey: conversation.replyConsentKey)
         }
 
-        let scope = ConversationScope(target: target, session: sessionID, window: frame, region: region)
+        guard let desktopTop = NSScreen.screens.first?.frame.maxY else { return }
         let intent: String
-        if let lastConversationSuggestion, lastConversationSuggestion.reply == optimizer.draft {
+        if let lastConversationSuggestion, lastConversationSuggestion.reply == draft {
             intent = lastConversationSuggestion.intent
         } else {
-            intent = optimizer.draft
+            intent = draft
         }
         let source: DeepSeekPromptAPI.WeChatSource = pastedText == nil ? .screenshot : .copiedText
-        let tone = replyControls.replyTone
-        let count = replyControls.replyCount
         let captureWindow = quartzFrame(frame, desktopTop: desktopTop)
-        let captureRegion = region.map { quartzFrame($0, desktopTop: desktopTop) }
+        let captureBounds = captureRegion.map { quartzFrame($0, desktopTop: desktopTop) }
         replyControls.phase = pastedText == nil ? .capturing : .suggesting
         suggestion = Task { [weak self] in
             do {
@@ -786,9 +800,9 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
                     transcript = pastedText
                 } else if let pastedScreenshot {
                     transcript = try await WeChatConversationCapture.recognize(screenshot: pastedScreenshot)
-                } else if let captureRegion {
+                } else if let captureBounds {
                     transcript = try await WeChatConversationCapture.recognize(
-                        pid: target.application.processIdentifier, windowFrame: captureWindow, transcriptFrame: captureRegion
+                        pid: target.application.processIdentifier, windowFrame: captureWindow, transcriptFrame: captureBounds
                     )
                 } else {
                     throw DeepSeekPromptAPI.Failure.emptyConversation
@@ -836,15 +850,26 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         }
     }
 
-    private func chooseReplyOption(_ id: Int) {
-        if replyControls.phase == .choosingTarget, let request = pendingReplyRequest,
+    private func chooseReplyOption(_ id: Int, insert: Bool = false) {
+        if !insert, replyControls.phase == .choosingTarget, let request = pendingReplyRequest,
            let message = request.speakers.selectableCounterparts.first(where: { $0.id == id }),
            matchesConversationScope(request.scope) {
             pendingReplyRequest = nil
             generateReplies(request, respondingTo: message)
         } else if replyControls.phase == .choosingReply, let pending = pendingReplies,
                   pending.replies.indices.contains(id), matchesConversationScope(pending.scope) {
-            putReplyInDraft(pending.replies[id], intent: pending.intent, keepRecentSuggestions: isSidebar)
+            let reply = pending.replies[id]
+            if isSidebar {
+                finishReplySelection()
+                if insert {
+                    directInsertText(reply)
+                } else {
+                    optimizer.draft = reply
+                    trackTarget()
+                }
+            } else {
+                putReplyInDraft(reply, intent: pending.intent)
+            }
         }
     }
 
@@ -890,12 +915,16 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
                     return
                 }
                 self.suggestion = nil
+                if self.isSidebar { self.replyControls.recentSuggestions = replies }
                 if replies.count == 1 {
-                    self.replyControls.recentSuggestions = []
-                    self.putReplyInDraft(replies[0], intent: request.intent)
+                    if self.isSidebar {
+                        self.finishReplySelection()
+                        self.trackTarget()
+                    } else {
+                        self.putReplyInDraft(replies[0], intent: request.intent)
+                    }
                 } else {
                     self.pendingReplies = (replies, request.intent, request.scope)
-                    if self.isSidebar { self.replyControls.recentSuggestions = replies }
                     self.replyControls.choices = replies.enumerated().map {
                         CompactWeChatChoice(id: $0.offset, text: $0.element, detail: nil)
                     }
@@ -910,52 +939,48 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
         trackTarget()
     }
 
-    private func putReplyInDraft(_ reply: String, intent: String, keepRecentSuggestions: Bool = false) {
-        pendingReplies = nil
-        replyControls.choices = []
-        if !keepRecentSuggestions { replyControls.recentSuggestions = [] }
+    private func putReplyInDraft(_ reply: String, intent: String) {
         lastConversationSuggestion = (reply: reply, intent: intent)
         optimizer.draft = reply
-        replyControls.phase = .idle
+        finishReplySelection()
         trackTarget()
     }
 
-    private func polishReplyDraft() {
-        guard isSidebar, isVisible, delivery == nil, suggestion == nil, polishTask == nil,
-              voice.phase == .idle, !replyControls.phase.isBusy else { return }
-        let draft = optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !draft.isEmpty else { return }
-        let tone = replyControls.replyTone
-        let session = sessionID
-        replyControls.isPolishing = true
-        replyControls.insertionNotice = nil
-        if case .failed = replyControls.phase { replyControls.phase = .idle }
-        polishTask = Task { [weak self] in
-            do {
-                let polished = try await DeepSeekPromptAPI.polishReply(draft, tone: tone)
-                try Task.checkCancellation()
-                guard let self, self.sessionID == session else { return }
-                self.polishTask = nil
-                self.replyControls.isPolishing = false
-                self.optimizer.draft = polished
-            } catch {
-                guard !Task.isCancelled, let self, self.sessionID == session else { return }
-                self.polishTask = nil
-                self.replyControls.isPolishing = false
-                self.replyControls.phase = .failed(error.localizedDescription)
-            }
-        }
+    private func finishReplySelection() {
+        pendingReplies = nil
+        replyControls.choices = []
+        replyControls.phase = .idle
     }
 
-    private func cancelPolish() {
-        polishTask?.cancel()
-        polishTask = nil
-        if replyControls.isPolishing { replyControls.isPolishing = false }
+    private func suggestFromDraft(_ draft: String, tone: DeepSeekPromptAPI.WeChatTone, count: Int, scope: ConversationScope) {
+        replyControls.replyTargetPreview = nil
+        replyControls.matchedLibraryCount = 0
+        replyControls.insertionNotice = nil
+        replyControls.phase = .suggesting
+        suggestion = Task { [weak self] in
+            do {
+                let replies = try await DeepSeekPromptAPI.suggestDraftReplies(draft, tone: tone, count: count)
+                try Task.checkCancellation()
+                guard let self else { return }
+                guard self.matchesConversationScope(scope) else {
+                    if self.sessionID == scope.session { self.cancelSuggestion() }
+                    return
+                }
+                self.suggestion = nil
+                self.replyControls.recentSuggestions = replies
+                self.finishReplySelection()
+                self.trackTarget()
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.showConversationFailure(error, session: scope.session)
+            }
+        }
+        trackTarget()
     }
 
     private func directInsertText(_ text: String) {
         guard let target, target.isConversation, target.isCurrentWindow, isVisible,
-              delivery == nil, suggestion == nil, polishTask == nil, voice.phase == .idle,
+              delivery == nil, suggestion == nil, voice.phase == .idle,
               replyControls.phase != .inserting else {
             onCopilotNotice?("请保持目标会话可见，等待当前操作完成后重试。")
             return
@@ -985,7 +1010,6 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
     private func cancelSuggestion() {
         suggestion?.cancel()
         suggestion = nil
-        cancelPolish()
         insertConfirmation.cancel()
         pendingReplyRequest = nil
         pendingReplies = nil
@@ -995,21 +1019,24 @@ final class CompactPromptPanel: NSObject, NSWindowDelegate {
 
     private func useReply() {
         guard let target, target.isConversation, target.isCurrentWindow, isVisible,
-              isSidebar || chatRegion(for: target) != nil, suggestion == nil, polishTask == nil, delivery == nil,
+              isSidebar || chatRegion(for: target) != nil, suggestion == nil, delivery == nil,
               ![.confirming, .choosingTarget, .choosingReply, .inserting].contains(replyControls.phase),
               voice.phase == .idle else { return }
-        if let editor = panel?.searchField, editor.hasMarkedText() {
-            editor.unmarkText()
-            optimizer.draft = editor.string
-        }
+        commitReplyComposition()
         let text = optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         stage(.text(text), in: target)
     }
 
+    private func commitReplyComposition() {
+        guard let panel, let editor = panel.searchField, editor.window === panel, editor.hasMarkedText() else { return }
+        editor.unmarkText()
+        optimizer.draft = editor.string
+    }
+
     private func stageMaterial(_ material: CopilotMaterial) {
         guard let copilotLibrary, let target, isVisible, target.isCurrentWindow,
-              delivery == nil, suggestion == nil, polishTask == nil, voice.phase == .idle, replyControls.phase != .inserting else {
+              delivery == nil, suggestion == nil, voice.phase == .idle, replyControls.phase != .inserting else {
             onCopilotNotice?("请保持目标会话可见，等待当前操作完成后重试。")
             return
         }

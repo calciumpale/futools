@@ -527,7 +527,9 @@ private struct PaletteView: View {
     private var ocrButton: some View {
         Button(action: model.runOCR) {
             HStack(spacing: 4) {
-                DockActivityGlyph(isBusy: model.isRecognizing)
+                if model.isRecognizing {
+                    DockActivityGlyph(isBusy: true)
+                }
                 Text("OCR").font(.system(size: 12, weight: .semibold))
             }
             .frame(width: 56, height: 29)
@@ -538,6 +540,7 @@ private struct PaletteView: View {
         .buttonStyle(DockPressStyle())
         .disabled(!model.canRecognize)
         .accessibilityLabel("OCR")
+        .accessibilityValue(model.isRecognizing ? "正在识别" : "")
         .help(model.screenshot == nil ? "将截图粘贴到输入框" : "发送截图到 DeepSeek 识别")
     }
 

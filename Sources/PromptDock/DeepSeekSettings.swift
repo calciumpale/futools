@@ -153,17 +153,17 @@ struct DeepSeekSettingsContent: View {
                 SecureField(hasKey == true ? "输入新密钥" : "输入密钥", text: $input)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 10)
-                    .frame(height: 30)
+                    .frame(height: 32)
                     .background(colors.background, in: RoundedRectangle(cornerRadius: 7))
                     .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.line).allowsHitTesting(false) }
                     .accessibilityLabel("DeepSeek API Key")
                     .onSubmit(save)
                     .disabled(isBusy)
-                Button(hasKey == true ? "替换密钥" : "保存密钥", action: save)
-                    .buttonStyle(.borderedProminent)
+                SettingsButton(title: hasKey == true ? "替换密钥" : "保存密钥", colors: colors,
+                               tone: .primary, width: 88, action: save)
                     .disabled(isBusy || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if hasKey == true {
-                    Button("移除密钥", role: .destructive, action: remove)
+                    SettingsButton(title: "移除密钥", colors: colors, width: 88, role: .destructive, action: remove)
                         .help("从本机钥匙串中移除")
                         .disabled(isBusy)
                 }

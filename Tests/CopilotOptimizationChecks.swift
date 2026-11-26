@@ -11,8 +11,10 @@ enum CopilotOptimizationChecks {
             try dockLayoutSupportsLeftRightAndFallback()
             try await libraryDecodesLegacyJSONAndSupportsPinsTagsAndKindFilter()
             try await apiSupportsPolishReplyReferenceMaterialsAndMultiTurnAgent()
+            try await apiDeliversCustomReplyTones()
+            try await apiSuggestsRepliesFromDraftAlone()
             try agentModelTracksChatContextAndResetsCleanly()
-            print("Passed 4 Copilot optimization checks.")
+            print("Passed 6 Copilot optimization checks.")
         } catch {
             FileHandle.standardError.write(Data("Copilot optimization check failed: \(error.localizedDescription)\n".utf8))
             exit(EXIT_FAILURE)
@@ -153,6 +155,104 @@ enum CopilotOptimizationChecks {
         try expect(answer.contains("5000"), "Multi-turn Agent answer was lost.")
     }
 
+    private static func apiDeliversCustomReplyTones() async throws {
+        let newTones = [
+            ("goofy", "搞怪", "无厘头"), ("sarcastic", "反讽", "反话"),
+            ("witty", "有趣", "巧妙联想"), ("formal", "正式", "避免俚语")
+        ]
+        let priorToneIDs = ["natural", "lively", "composed", "concise", "polite"]
+        try expect(DeepSeekPromptAPI.WeChatTone.allCases.map(\.rawValue) == priorToneIDs + newTones.map { $0.0 },
+                   "New tones must follow the existing stable tone IDs.")
+
+        func check(_ request: URLRequest, field: String, toneID: String?, guidance: String) throws -> (Data, URLResponse) {
+            guard let body = request.httpBody,
+                  let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let messages = json["messages"] as? [[String: String]],
+                  let system = messages.first?["content"], let user = messages.last?["content"],
+                  let payload = try JSONSerialization.jsonObject(with: Data(user.utf8)) as? [String: Any] else {
+                throw CheckError.failed("Tone request was malformed.")
+            }
+            try expect(payload[field] as? String == toneID && system.contains(guidance),
+                       "Tone ID or its distinct model guidance was missing from the request.")
+            return response(#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"好的，已经记录了。"}}]}"#)
+        }
+
+        for (id, title, guidance) in newTones {
+            guard let tone = DeepSeekPromptAPI.WeChatTone(rawValue: id), tone.title == title else {
+                throw CheckError.failed("New tone did not match its user-visible label.")
+            }
+            _ = try await DeepSeekPromptAPI.suggestWeChatReply("对方：收到了吗？", tone: tone, loadKey: { fakeKey }) { request in
+                try check(request, field: "reply_tone", toneID: id, guidance: guidance)
+            }
+            _ = try await DeepSeekPromptAPI.polishReply("我收到了", tone: tone, loadKey: { fakeKey }) { request in
+                try check(request, field: "tone", toneID: id, guidance: guidance)
+            }
+        }
+
+        _ = try await DeepSeekPromptAPI.polishReply("我收到了", loadKey: { fakeKey }) { request in
+            try check(request, field: "tone", toneID: "natural", guidance: "自然得体")
+        }
+    }
+
+    private static func apiSuggestsRepliesFromDraftAlone() async throws {
+        let draft = "我周五下午两点可以。"
+        let alternatives = ["我周五下午两点有空。", "周五下午两点，我这边可以。", "我可以参加，时间是周五下午两点。"]
+        for count in [1, 3] {
+            var requestCount = 0
+            let suggestions = try await DeepSeekPromptAPI.suggestDraftReplies(draft, tone: .formal, count: count, loadKey: { fakeKey }) { request in
+                requestCount += 1
+                guard let body = request.httpBody,
+                      let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let messages = json["messages"] as? [[String: String]],
+                      let system = messages.first?["content"], let user = messages.last?["content"],
+                      let payload = try JSONSerialization.jsonObject(with: Data(user.utf8)) as? [String: String] else {
+                    throw CheckError.failed("Draft reply request was malformed.")
+                }
+                try expect(messages.count == 2 && payload == ["draft": draft, "tone": "formal"],
+                           "Draft suggestions must send only the current draft and tone.")
+                try expect(system.contains("原意") && system.contains("人称视角") && system.contains("避免俚语"),
+                           "Draft suggestions must preserve meaning and voice and apply the selected tone.")
+                let format = (json["response_format"] as? [String: String])?["type"]
+                if count == 1 {
+                    try expect(format == nil, "A single draft suggestion must use plain text.")
+                    return try replyResponse(alternatives[0])
+                }
+                try expect(format == "json_object" && system.contains("恰好 3 条"),
+                           "The multi-suggestion request must request the exact count in JSON mode.")
+                return try replyResponse(#"{"replies":["我周五下午两点有空。"," 周五下午两点，我这边可以。 ","我可以参加，时间是周五下午两点。"]}"#)
+            }
+            try expect(requestCount == 1 && suggestions == Array(alternatives.prefix(count)),
+                       "Draft suggestions changed the requested count or text.")
+        }
+
+        var readKey = false
+        do {
+            _ = try await DeepSeekPromptAPI.suggestDraftReplies(draft, tone: .natural, count: 4, loadKey: {
+                readKey = true
+                return fakeKey
+            }) { _ in throw CheckError.failed("An invalid count reached transport.") }
+            throw CheckError.failed("An invalid draft suggestion count was accepted.")
+        } catch DeepSeekPromptAPI.Failure.invalidReplyCount {
+            try expect(!readKey, "An invalid count accessed credentials.")
+        }
+
+        do {
+            _ = try await DeepSeekPromptAPI.suggestDraftReplies(draft, tone: .natural, count: 2, loadKey: { fakeKey }) { _ in
+                try replyResponse(#"{"replies":["See you Friday"," see you  friday "]}"#)
+            }
+            throw CheckError.failed("Duplicate draft suggestions were accepted.")
+        } catch DeepSeekPromptAPI.Failure.malformedReply {}
+
+        do {
+            _ = try await DeepSeekPromptAPI.suggestDraftReplies(draft, tone: .natural, count: 2, loadKey: { fakeKey }) { _ in
+                response("{}", status: 413)
+            }
+            throw CheckError.failed("An oversize draft rejection was accepted.")
+        } catch let error as DeepSeekPromptAPI.Failure {
+            try expect(error.localizedDescription.contains("草稿"), "A failed draft request suggested fixing chat context.")
+        }
+    }
+
     private static func agentModelTracksChatContextAndResetsCleanly() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("CopilotAgentCheck-\(UUID().uuidString)", isDirectory: true)
@@ -169,6 +269,12 @@ enum CopilotOptimizationChecks {
 
     private static func response(_ body: String, status: Int = 200, url: URL = DeepSeekPromptAPI.endpoint) -> (Data, URLResponse) {
         (Data(body.utf8), HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/2", headerFields: nil)!)
+    }
+
+    private static func replyResponse(_ content: String) throws -> (Data, URLResponse) {
+        let body = ["choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": content]]]]
+        let data = try JSONSerialization.data(withJSONObject: body)
+        return response(String(decoding: data, as: UTF8.self))
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

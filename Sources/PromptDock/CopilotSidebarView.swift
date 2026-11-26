@@ -11,9 +11,6 @@ struct CopilotSidebarView: View {
     @ObservedObject var agent: CopilotAgentModel
     let onToggleDockSide: () -> Void
     let onClose: () -> Void
-    let onBeginVoice: () -> Void
-    let onEndVoice: () -> Void
-    let onCancelVoice: () -> Void
     let onStageMaterial: (CopilotMaterial) -> Void
     let onDirectInsertText: (String) -> Void
     let onStageAnswer: (String) -> Void
@@ -217,9 +214,6 @@ struct CopilotSidebarView: View {
                 controls: controls,
                 libraryCount: library.materials.count,
                 theme: theme,
-                onBeginVoice: onBeginVoice,
-                onEndVoice: onEndVoice,
-                onCancelVoice: onCancelVoice,
                 onShowToast: showToast
             )
         case .library:

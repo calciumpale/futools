@@ -10,32 +10,30 @@ struct CopilotReplyView: View {
     @ObservedObject var controls: CompactWeChatControls
     let libraryCount: Int
     let theme: CopilotTheme
-    let onBeginVoice: () -> Void
-    let onEndVoice: () -> Void
-    let onCancelVoice: () -> Void
     let onShowToast: (String, String) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ReplyState private var contextExpanded = false
-    @ReplyState private var copiedDraft = false
     @ReplyState private var copiedCandidateKey: String?
     @ReplyState private var copyResetTask: Task<Void, Never>?
-
-    private static let quickIntents: [(label: String, intent: String)] = [
-        ("确认收到", "确认收到，并告知后续安排"),
-        ("约个时间", "礼貌确认方便沟通的具体时间"),
-        ("礼貌婉拒", "委婉表达目前不方便或暂不需要"),
-        ("稍后回复", "先告知已看到，确认细节后再回复"),
-        ("请补充细节", "礼貌请对方补充更具体的信息")
-    ]
 
     private var colors: DockColors { theme.base }
     private var trimmedDraft: String { optimizer.draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var hasDraft: Bool { !trimmedDraft.isEmpty }
-    private var isBusy: Bool { controls.phase.isBusy || controls.isPolishing || voice.phase != .idle }
+    private var isBusy: Bool { controls.phase.isBusy || voice.phase != .idle }
+    private var canInsertDraft: Bool {
+        !isBusy && ![.confirming, .choosingTarget, .choosingReply].contains(controls.phase)
+    }
+    private var canInsertGeneratedReply: Bool { canInsertDraft && controls.onDirectInsertText != nil }
+
+    private var canSuggest: Bool {
+        controls.phase != .inserting && voice.phase == .idle && controls.onSuggest != nil &&
+            (hasDraft || !controls.needsPastedContext)
+    }
 
     private var hasContext: Bool {
-        controls.pastedTextPreview != nil || controls.hasScreenshot || controls.hasSelectedRegion
+        controls.pastedTextPreview != nil || controls.hasScreenshot ||
+            (controls.hasSelectedRegion && !controls.captureIsRestricted)
     }
 
     var body: some View {
@@ -43,6 +41,7 @@ struct CopilotReplyView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 9) {
                     contextCard
+                    draftCard
 
                     if controls.phase == .confirming {
                         consentCard
@@ -55,7 +54,6 @@ struct CopilotReplyView: View {
                             .transition(DockMotion.reveal(reduceMotion: reduceMotion))
                     }
 
-                    draftCard
                     styleControlsCard
 
                     if controls.phase != .choosingReply && !controls.recentSuggestions.isEmpty {
@@ -115,7 +113,7 @@ struct CopilotReplyView: View {
                 ) {
                     controls.onPasteContext?()
                 }
-                .help("读取剪贴板中的聊天文字或截图（也可在草稿区按 ⌘V 粘贴截图）")
+                .help("读取剪贴板中的聊天文字或截图")
             }
 
             if let image = controls.screenshotPreview, hasScreenshot {
@@ -187,7 +185,7 @@ struct CopilotReplyView: View {
                 .help(target)
             }
 
-            if controls.needsPastedContext {
+            if controls.needsPastedContext && !hasDraft {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "info.circle.fill")
                         .font(.system(size: 11))
@@ -290,7 +288,7 @@ struct CopilotReplyView: View {
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(colors.ink)
             }
-            Text("截图在本机识别。识别或粘贴的聊天文字、所选消息、回复意图和语气会发送给 DeepSeek 用于生成回复。")
+            Text("生成建议会将「我想说的话」中填写的内容和所选语气发送给 DeepSeek。使用会话上下文时，也会发送聊天文字和所选消息。截图在本机识别，原图保留在本机。")
                 .font(.system(size: 11.5))
                 .foregroundStyle(colors.body)
                 .lineSpacing(2.5)
@@ -378,6 +376,7 @@ struct CopilotReplyView: View {
             }
             return controls.recentSuggestions.enumerated().map { ($0.offset, $0.element, false) }
         }()
+        let showsEdit = items.count == 1 && controls.phase != .choosingReply
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
@@ -419,7 +418,7 @@ struct CopilotReplyView: View {
 
             VStack(spacing: 7) {
                 ForEach(items, id: \.id) { item in
-                    candidateRow(index: item.id, text: item.text, fromPending: item.fromPending)
+                    candidateRow(index: item.id, text: item.text, fromPending: item.fromPending, showsEdit: showsEdit)
                 }
             }
         }
@@ -427,17 +426,20 @@ struct CopilotReplyView: View {
         .copilotCard(theme, cornerRadius: 10, focused: controls.phase == .choosingReply)
     }
 
-    private func candidateRow(index: Int, text: String, fromPending: Bool) -> some View {
+    private func candidateRow(index: Int, text: String, fromPending: Bool, showsEdit: Bool) -> some View {
         let isSelected = !fromPending && trimmedDraft == text.trimmingCharacters(in: .whitespacesAndNewlines)
         let copyKey = "\(index)::\(text)"
         let isCopied = copiedCandidateKey == copyKey
+        let canInsert = fromPending
+            ? !isBusy && controls.onInsertChoice != nil
+            : canInsertGeneratedReply
 
-        return VStack(alignment: .leading, spacing: 7) {
+        return HStack(alignment: .top, spacing: 6) {
             Button {
                 if fromPending {
-                    controls.onChoose?(index)
+                    controls.onInsertChoice?(index)
                 } else {
-                    optimizer.draft = text
+                    controls.onDirectInsertText?(text)
                 }
             } label: {
                 HStack(alignment: .top, spacing: 7) {
@@ -458,50 +460,32 @@ struct CopilotReplyView: View {
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                    insertIndicator(isEnabled: canInsert)
+                        .padding(.top, 2)
                 }
+                .padding(.vertical, 2)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DockPressStyle())
+            .disabled(!canInsert)
+            .help("插入\(controls.appName)输入框")
+            .accessibilityLabel("插入第 \(index + 1) 条回复，\(text)")
 
-            HStack(spacing: 6) {
-                Button {
-                    if fromPending {
-                        controls.onChoose?(index)
-                    } else {
+            VStack(spacing: 3) {
+                if showsEdit {
+                    Button("编辑") {
+                        let panel = NSApp.keyWindow as? PaletteWindow
+                        panel?.searchField?.unmarkText()
                         optimizer.draft = text
+                        panel?.focusSearch()
                     }
-                } label: {
-                    Text(isSelected ? "当前草稿" : "填入草稿")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(isSelected ? colors.accent : colors.secondary)
-                        .padding(.horizontal, 7)
-                        .frame(height: 22)
-                        .background(
-                            isSelected ? theme.accentSoft : colors.control,
-                            in: RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        )
-                }
-                .buttonStyle(DockPressStyle())
-
-                Button {
-                    if fromPending { controls.onChoose?(index) }
-                    controls.onDirectInsertText?(text)
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "paperplane.fill")
-                            .font(.system(size: 9))
-                        Text("直接插入")
-                            .font(.system(size: 10.5, weight: .semibold))
-                    }
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(colors.accent)
-                    .padding(.horizontal, 7)
-                    .frame(height: 22)
-                    .background(theme.accentSoft, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .buttonStyle(DockPressStyle())
+                    .help("将这条回复填入「我想说的话」")
+                    .accessibilityLabel("编辑这条回复")
                 }
-                .buttonStyle(DockPressStyle())
-                .disabled(isBusy)
-
-                Spacer(minLength: 2)
 
                 CopilotIconHoverButton(
                     symbol: isCopied ? "checkmark" : "doc.on.doc",
@@ -517,7 +501,7 @@ struct CopilotReplyView: View {
                     scheduleCopyReset()
                 }
             }
-            .padding(.leading, 25)
+            .disabled(isBusy)
         }
         .padding(9)
         .background(
@@ -529,6 +513,13 @@ struct CopilotReplyView: View {
                 .strokeBorder(isSelected ? theme.cardBorderFocused : theme.cardBorder, lineWidth: 1)
                 .allowsHitTesting(false)
         }
+    }
+
+    private func insertIndicator(isEnabled: Bool) -> some View {
+        Label("插入", systemImage: "paperplane")
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(isEnabled ? colors.accent : colors.secondary)
+            .fixedSize()
     }
 
     // MARK: - Style Controls (Tone, Count, Library Grounding)
@@ -579,34 +570,10 @@ struct CopilotReplyView: View {
                 .help("每次生成的候选回复数量")
             }
 
-            // Inline tone pills
-            HStack(spacing: 5) {
-                ForEach(DeepSeekPromptAPI.WeChatTone.allCases, id: \.self) { tone in
-                    let selected = controls.replyTone == tone
-                    Button {
-                        controls.onSetReplyTone?(tone)
-                    } label: {
-                        Text(tone.title)
-                            .font(.system(size: 11, weight: selected ? .semibold : .medium))
-                            .foregroundStyle(selected ? colors.accent : colors.secondary)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 25)
-                            .background(
-                                selected ? theme.accentSoft : colors.control,
-                                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            )
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .strokeBorder(
-                                        selected ? colors.accent.opacity(theme.dark ? 0.36 : 0.26) : theme.cardBorder,
-                                        lineWidth: 1
-                                    )
-                                    .allowsHitTesting(false)
-                            }
-                    }
-                    .buttonStyle(DockPressStyle())
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                }
+            VStack(spacing: 5) {
+                let tones = DeepSeekPromptAPI.WeChatTone.allCases
+                toneRow(tones.prefix(5))
+                toneRow(tones.dropFirst(5))
             }
             .disabled(isBusy)
         }
@@ -614,12 +581,44 @@ struct CopilotReplyView: View {
         .copilotCard(theme, cornerRadius: 10)
     }
 
-    // MARK: - Draft Composer Card
+    private func toneRow(_ tones: ArraySlice<DeepSeekPromptAPI.WeChatTone>) -> some View {
+        HStack(spacing: 5) {
+            ForEach(tones, id: \.self) { tone in
+                let selected = controls.replyTone == tone
+                Button {
+                    controls.onSetReplyTone?(tone)
+                } label: {
+                    Text(tone.title)
+                        .font(.system(size: 11, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? colors.accent : colors.secondary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 25)
+                        .background(
+                            selected ? theme.accentSoft : colors.control,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(
+                                    selected ? colors.accent.opacity(theme.dark ? 0.36 : 0.26) : theme.cardBorder,
+                                    lineWidth: 1
+                                )
+                                .allowsHitTesting(false)
+                        }
+                }
+                .buttonStyle(DockPressStyle())
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+
+    // MARK: - Reply Composer
 
     private var draftCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                CopilotSectionTitle(title: "回复意图 / 草稿", symbol: "square.and.pencil", theme: theme)
+                CopilotSectionTitle(title: "我想说的话", symbol: "square.and.pencil", theme: theme)
                 Spacer(minLength: 4)
                 if hasDraft {
                     Text("\(trimmedDraft.count) 字")
@@ -628,120 +627,22 @@ struct CopilotReplyView: View {
                 }
             }
 
-            // Quick intent chips when draft is empty
-            if !hasDraft && !isBusy {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 5) {
-                        ForEach(Self.quickIntents, id: \.label) { item in
-                            Button {
-                                optimizer.draft = item.intent
-                            } label: {
-                                Text(item.label)
-                                    .font(.system(size: 10.5, weight: .medium))
-                                    .foregroundStyle(colors.secondary)
-                                    .padding(.horizontal, 8)
-                                    .frame(height: 22)
-                                    .background(theme.cardSubtle, in: Capsule(style: .continuous))
-                                    .overlay {
-                                        Capsule(style: .continuous)
-                                            .strokeBorder(theme.cardBorder, lineWidth: 1)
-                                            .allowsHitTesting(false)
-                                    }
-                            }
-                            .buttonStyle(DockPressStyle())
-                            .help("填入意图：\(item.intent)")
-                        }
-                    }
-                    .padding(.vertical, 1)
-                }
-            }
-
-            VStack(spacing: 0) {
-                PaletteTextEditor(
-                    text: $optimizer.draft,
-                    label: "回复草稿",
-                    fontSize: 13.5,
-                    textColor: colors.ink,
-                    accentColor: colors.accent,
-                    placeholder: "写下想怎么回（可选），或直接编辑回复…",
-                    placeholderColor: colors.secondary,
-                    fixedViewportHeight: 74,
-                    fixedTextVerticalInset: 6,
-                    isSearchEditor: true,
-                    onOptimize: triggerKeyboardSuggest,
-                    onPasteImage: controls.onPasteScreenshot
-                )
-                .padding(.horizontal, 8)
-                .padding(.top, 2)
-
-                Rectangle().fill(colors.line.opacity(0.7)).frame(height: 1)
-
-                // Draft utility bar
-                HStack(spacing: 5) {
-                    VoicePressButton(
-                        phase: voice.phase,
-                        isEnabled: !controls.phase.isBusy && !controls.isPolishing,
-                        canPressAnywhere: controls.canPressAnywhere,
-                        onBegin: onBeginVoice,
-                        onEnd: onEndVoice,
-                        onCancel: onCancelVoice,
-                        style: .compact
-                    )
-
-                    // Standalone AI Polish button (works even without captured context!)
-                    Button {
-                        controls.onPolishDraft?()
-                    } label: {
-                        HStack(spacing: 4) {
-                            DockActivityGlyph(isBusy: controls.isPolishing, idleSymbol: "wand.and.stars")
-                            Text(controls.isPolishing ? "润色中" : "按\(controls.replyTone.title)语气润色")
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(hasDraft && !isBusy ? colors.accent : colors.secondary)
-                        .padding(.horizontal, 8)
-                        .frame(height: 24)
-                        .background(
-                            hasDraft && !isBusy ? theme.accentSoft : colors.control,
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        )
-                    }
-                    .buttonStyle(DockPressStyle())
-                    .disabled(!hasDraft || isBusy || controls.onPolishDraft == nil)
-                    .help("无需聊天上下文，直接按「\(controls.replyTone.title)」语气润色当前草稿")
-
-                    Spacer(minLength: 2)
-
-                    if hasDraft {
-                        CopilotIconHoverButton(
-                            symbol: copiedDraft ? "checkmark" : "doc.on.doc",
-                            theme: theme,
-                            tint: copiedDraft ? theme.success : nil,
-                            size: 24,
-                            iconSize: 10.5,
-                            helpText: copiedDraft ? "已复制" : "复制草稿"
-                        ) {
-                            CopilotPasteboard.copy(optimizer.draft)
-                            copiedDraft = true
-                            onShowToast("已复制草稿", "checkmark.circle.fill")
-                            scheduleCopyReset()
-                        }
-
-                        CopilotIconHoverButton(
-                            symbol: "xmark.circle",
-                            theme: theme,
-                            size: 24,
-                            iconSize: 11,
-                            helpText: "清空草稿"
-                        ) {
-                            optimizer.draft = ""
-                        }
-                        .disabled(isBusy)
-                    }
-                }
-                .padding(.horizontal, 7)
-                .frame(height: 34)
-            }
+            PaletteTextEditor(
+                text: $optimizer.draft,
+                label: "我想说的话",
+                fontSize: 13.5,
+                textColor: colors.ink,
+                accentColor: colors.accent,
+                placeholder: "写下想回复的内容…",
+                placeholderColor: colors.secondary,
+                fixedViewportHeight: 74,
+                fixedTextVerticalInset: 6,
+                isSearchEditor: true,
+                onOptimize: triggerSuggestion,
+                onPasteImage: controls.onPasteScreenshot
+            )
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
             .background(theme.composerSurface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -767,10 +668,10 @@ struct CopilotReplyView: View {
         case .recording: return Banner(kind: .busy, text: voice.message ?? "正在录音，松开后转写")
         case .finishing: return Banner(kind: .busy, text: "正在转写语音…")
         case .idle:
-            if controls.isPolishing { return Banner(kind: .busy, text: "正在按「\(controls.replyTone.title)」语气润色草稿…") }
             switch controls.phase {
             case .capturing: return Banner(kind: .busy, text: "正在识别\(controls.appName)聊天内容…")
-            case .suggesting: return Banner(kind: .busy, text: "正在生成 \(controls.replyCount) 条\(controls.replyTone.title)回复建议…")
+            case .suggesting:
+                return Banner(kind: .busy, text: "正在按「\(controls.replyTone.title)」语气生成 \(controls.replyCount) 条回复建议…")
             case .inserting: return Banner(kind: .busy, text: controls.insertionProgress)
             case .failed(let message): return Banner(kind: .error, text: message)
             case .idle:
@@ -838,15 +739,11 @@ struct CopilotReplyView: View {
 
     private var actionFooter: some View {
         let phase = controls.phase
-        let waitingForContext = controls.needsPastedContext
-        let canSuggest = phase != .inserting && !controls.isPolishing && !waitingForContext && voice.phase == .idle && controls.onSuggest != nil
         let isGenerating = phase.isGenerating
-        let canInsert = hasDraft && !isBusy && ![.confirming, .choosingTarget, .choosingReply].contains(phase) && controls.onInsert != nil
+        let canInsert = hasDraft && canInsertDraft && controls.onInsert != nil
 
         return HStack(spacing: 8) {
-            Button {
-                controls.onSuggest?()
-            } label: {
+            Button(action: triggerSuggestion) {
                 HStack(spacing: 5) {
                     DockActivityGlyph(
                         isBusy: isGenerating,
@@ -881,8 +778,9 @@ struct CopilotReplyView: View {
                 }
             }
             .buttonStyle(DockPressStyle())
+            .keyboardShortcut(.return, modifiers: .command)
             .disabled(!canSuggest)
-            .help(hasContext ? "结合上下文生成回复建议（⌘↩）" : "点击先框选消息或生成建议（⌘↩）")
+            .help(hasContext ? "结合会话上下文生成回复建议（⌘↩）" : "写下想说的话，或提供聊天内容后生成建议（⌘↩）")
 
             if hasDraft && phase != .confirming {
                 Button {
@@ -917,13 +815,8 @@ struct CopilotReplyView: View {
         .background(theme.headerSurface)
     }
 
-    private func triggerKeyboardSuggest() {
-        guard !isBusy, !controls.needsPastedContext else { return }
-        if !hasContext && hasDraft {
-            controls.onPolishDraft?()
-        } else {
-            controls.onSuggest?()
-        }
+    private func triggerSuggestion() {
+        if canSuggest { controls.onSuggest?() }
     }
 
     private func scheduleCopyReset() {
@@ -931,7 +824,6 @@ struct CopilotReplyView: View {
         copyResetTask = Task {
             try? await Task.sleep(for: .seconds(1.8))
             guard !Task.isCancelled else { return }
-            copiedDraft = false
             copiedCandidateKey = nil
         }
     }

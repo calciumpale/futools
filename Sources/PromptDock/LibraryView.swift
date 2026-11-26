@@ -665,7 +665,7 @@ private struct LibrarySettings: View {
     }
 }
 
-private struct SettingsButton: View {
+struct SettingsButton: View {
     enum Tone: Equatable {
         case neutral, primary, selected
     }
@@ -676,6 +676,7 @@ private struct SettingsButton: View {
     var symbol: String?
     var width: CGFloat?
     var height: CGFloat = 32
+    var role: ButtonRole? = nil
     let action: () -> Void
 
     @Environment(\.isEnabled) private var isEnabled
@@ -684,7 +685,7 @@ private struct SettingsButton: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 8)
         let (foreground, fill, border) = style
-        Button(action: action) {
+        Button(role: role, action: action) {
             HStack(spacing: 6) {
                 if let symbol {
                     Image(systemName: symbol)

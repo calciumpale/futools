@@ -295,25 +295,38 @@ struct CopilotLibraryView: View {
             }
             if store.materials.isEmpty {
                 HStack(spacing: 8) {
-                    Button { addMaterial() } label: {
-                        Label("新建素材", systemImage: "plus")
-                            .font(.system(size: 11.5, weight: .medium))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-
-                    Button { addFromClipboard() } label: {
-                        Label("从剪贴板导入", systemImage: "doc.on.clipboard")
-                            .font(.system(size: 11.5, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    emptyStateButton("新建素材", symbol: "plus", primary: true, action: addMaterial)
+                    emptyStateButton("从剪贴板导入", symbol: "doc.on.clipboard", primary: false, action: addFromClipboard)
                 }
+                .frame(maxWidth: 244)
                 .padding(.top, 2)
             }
         }
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func emptyStateButton(_ title: String, symbol: String, primary: Bool, action: @escaping () -> Void) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.system(size: 11.5, weight: primary ? .semibold : .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+            }
+            .foregroundStyle(primary ? .white : colors.ink)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .frame(height: 32)
+            .background(primary ? colors.action : theme.composerSurface, in: shape)
+            .overlay { shape.strokeBorder(primary ? .clear : theme.cardBorder).allowsHitTesting(false) }
+            .contentShape(shape)
+        }
+        .buttonStyle(DockPressStyle())
     }
 
     private func materialCard(_ material: CopilotMaterial) -> some View {

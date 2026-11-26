@@ -51,19 +51,18 @@ final class CompactWeChatControls: ObservableObject {
     @Published var replyTone: DeepSeekPromptAPI.WeChatTone = .natural
     @Published var useLibraryInReply = false
     @Published var matchedLibraryCount = 0
-    @Published var isPolishing = false
     @Published var replyTargetPreview: String?
     @Published var insertionNotice: String?
     var onSuggest: (() -> Void)?
     var onInsert: (() -> Void)?
     var onDirectInsertText: ((String) -> Void)?
-    var onPolishDraft: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSelectRegion: (() -> Void)?
     var onPasteContext: (() -> Void)?
     var onPasteScreenshot: ((NSPasteboard) -> Bool)?
     var onRemoveScreenshot: (() -> Void)?
     var onChoose: ((Int) -> Void)?
+    var onInsertChoice: ((Int) -> Void)?
     var onSetReplyCount: ((Int) -> Void)?
     var onSetReplyTone: ((DeepSeekPromptAPI.WeChatTone) -> Void)?
     var onSetUseLibrary: ((Bool) -> Void)?
