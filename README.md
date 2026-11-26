@@ -20,17 +20,17 @@ futools 是一款 macOS 菜单栏工具，用快捷键把提示词、语音输�
 
 当前仓库源码可构建 **1.5.2**。 [本地构建](#本地构建)
 
-GitHub Releases 提供的安装包版本为 **v1.3**，适用于运行 macOS 13 及以上版本的 Apple 芯片和 Intel Mac。 [v1.3 发布说明](https://github.com/calciumpale/futools/releases/tag/v1.3) · [下载 v1.3 通用安装包](https://github.com/calciumpale/futools/releases/download/v1.3/futools-v1.3-macOS-universal.zip)
+GitHub Releases 提供 **v1.5.2** 通用安装包，适用于运行 macOS 13 及以上版本的 Apple 芯片和 Intel Mac。 [v1.5.2 发布说明](https://github.com/calciumpale/futools/releases/tag/v1.5.2) · [下载 v1.5.2 通用安装包](https://github.com/calciumpale/futools/releases/download/v1.5.2/futools-v1.5.2-macOS-universal.zip)
 
-将校验文件和 ZIP 放在同一目录，运行 `shasum -a 256 -c futools-v1.3-macOS-universal.zip.sha256` 即可核对下载。 [SHA-256 校验文件](https://github.com/calciumpale/futools/releases/download/v1.3/futools-v1.3-macOS-universal.zip.sha256)
+将校验文件和 ZIP 放在同一目录，运行 `shasum -a 256 -c futools-v1.5.2-macOS-universal.zip.sha256` 即可核对下载。 [SHA-256 校验文件](https://github.com/calciumpale/futools/releases/download/v1.5.2/futools-v1.5.2-macOS-universal.zip.sha256)
 
-1. 解压 ZIP，把 `futools.app` 拖到 Finder 的「应用程序」中。
+1. 如果正在运行旧版 futools，请先退出。解压 ZIP，把 `futools.app` 拖到 Finder 的「应用程序」中。
 2. 双击打开 `futools`。首次启动会打开设置，以后也可从菜单栏的 futools 图标进入。
 3. 要启用自动填入，在应用设置中点「打开系统设置」，然后在 macOS 的「系统设置 → 隐私与安全性 → 辅助功能」中开启 futools。授权前也能使用面板，按 **Enter** 会把提示词复制到剪贴板。
 
 ### 首次打开时的 macOS 提示
 
-v1.3 安装包使用临时签名（ad hoc），尚未通过 Apple 公证。如果 macOS 提示无法验证开发者，请先确认应用来自上面的 GitHub 发布页。尝试打开后，进入「系统设置 → 隐私与安全性」，在「安全性」区域点击「仍要打开」，再按系统提示确认。这个设置仅适用于当前应用。 [Apple：在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)
+v1.5.2 安装包使用临时签名（ad hoc），尚未通过 Apple 公证。如果 macOS 提示无法验证开发者，请先确认应用来自上面的 GitHub 发布页。尝试打开后，进入「系统设置 → 隐私与安全性」，在「安全性」区域点击「仍要打开」，再按系统提示确认。这个设置仅适用于当前应用。 [Apple：在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)
 
 ## 命令面板
 
